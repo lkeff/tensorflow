@@ -1,8 +1,9 @@
 # Description:
 #   XLA client libraries.
 
-load("@local_tsl//tsl/platform:rules_cc.bzl", "cc_library")
+load("//xla:xla.bzl", "xla_cc_test")
 load("//xla/tsl:tsl.default.bzl", "filegroup")
+load("//xla/tsl/platform:rules_cc.bzl", "cc_library")
 
 package(
     # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
@@ -40,11 +41,10 @@ cc_library(
     ],
 )
 
-# Deprecated, use //third_party/tensorflow/compiler/xla/hlo/builder:padding
-# instead.
 cc_library(
     name = "padding",
     hdrs = ["padding.h"],
+    deprecation = "This library is deprecated. Use //third_party/tensorflow/compiler/xla/hlo/builder:padding instead.",
     deps = [
         "//xla/hlo/builder:padding",
     ],
@@ -55,7 +55,6 @@ cc_library(
     srcs = ["client.cc"],
     hdrs = ["client.h"],
     deps = [
-        ":xla_computation",
         "//xla:execution_options_util",
         "//xla:literal",
         "//xla:shape_util",
@@ -64,6 +63,7 @@ cc_library(
         "//xla:util",
         "//xla:xla_data_proto_cc",
         "//xla:xla_proto_cc",
+        "//xla/hlo/builder:xla_computation",
         "//xla/service",
         "//xla/service:hlo_proto_cc",
         "@com_google_absl//absl/status",
@@ -101,6 +101,27 @@ cc_library(
     ],
 )
 
+xla_cc_test(
+    name = "executable_build_options_test",
+    srcs = ["executable_build_options_test.cc"],
+    deps = [
+        ":executable_build_options",
+        "//xla:protobuf_util",
+        "//xla:shape_util",
+        "//xla/service:computation_placer",
+        "//xla/service:test_compilation_environment_proto_cc",
+        "//xla/tsl/lib/core:status_test_util",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_googletest//:gtest",
+        "@local_tsl//tsl/platform:env",
+        "@local_tsl//tsl/platform:protobuf",
+        "@local_tsl//tsl/platform:status_matchers",
+        "@local_tsl//tsl/platform:statusor",
+        "@local_tsl//tsl/platform:test_main",
+    ],
+)
+
 cc_library(
     name = "local_client",
     srcs = ["local_client.cc"],
@@ -108,7 +129,6 @@ cc_library(
     deps = [
         ":client",
         ":executable_build_options",
-        ":xla_computation",
         "//xla:debug_options_flags",
         "//xla:executable_run_options",
         "//xla:literal",
@@ -116,6 +136,7 @@ cc_library(
         "//xla:shape_util",
         "//xla:util",
         "//xla:xla_data_proto_cc",
+        "//xla/hlo/builder:xla_computation",
         "//xla/service:backend",
         "//xla/service:compiler",
         "//xla/service:computation_layout",
@@ -126,8 +147,10 @@ cc_library(
         "//xla/service:shaped_buffer",
         "//xla/service:source_map_util",
         "//xla/service:stream_pool",
-        "//xla/stream_executor",
         "//xla/stream_executor:device_memory_allocator",
+        "//xla/stream_executor:platform",
+        "//xla/stream_executor:stream",
+        "//xla/stream_executor:stream_executor_h",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/status",
@@ -145,15 +168,15 @@ cc_library(
     hdrs = ["compile_only_client.h"],
     deps = [
         ":client",
-        ":xla_computation",
         "//xla:shape_util",
         "//xla:status_macros",
         "//xla:xla_data_proto_cc",
         "//xla:xla_proto_cc",
+        "//xla/hlo/builder:xla_computation",
         "//xla/service:compile_only_service",
         "//xla/service:compiler",
         "//xla/service:hlo_module_config",
-        "//xla/stream_executor",
+        "//xla/stream_executor:stream_executor_h",
         "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings:string_view",
@@ -177,8 +200,9 @@ cc_library(
         "//xla/service:compile_only_service",
         "//xla/service:local_service",
         "//xla/service:platform_util",
-        "//xla/stream_executor",
         "//xla/stream_executor:device_memory_allocator",
+        "//xla/stream_executor:platform",
+        "//xla/stream_executor:stream_executor_h",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/status:statusor",
@@ -189,43 +213,39 @@ cc_library(
     ],
 )
 
-# Deprecated, use //third_party/tensorflow/compiler/xla/hlo/builder:sharding_builder
-# instead.
 cc_library(
     name = "sharding_builder",
     hdrs = ["sharding_builder.h"],
+    deprecation = "This library is deprecated. Use //third_party/tensorflow/compiler/xla/hlo/builder:sharding_builder instead.",
     deps = [
         "//xla/hlo/builder:sharding_builder",
     ],
 )
 
-# Deprecated, use //third_party/tensorflow/compiler/xla/hlo/builder:xla_computation
-# instead.
 cc_library(
     name = "xla_computation",
     hdrs = ["xla_computation.h"],
+    deprecation = "This library is deprecated. Use //third_party/tensorflow/compiler/xla/hlo/builder:xla_computation instead.",
     visibility = ["//visibility:public"],
     deps = [
         "//xla/hlo/builder:xla_computation",
     ],
 )
 
-# Deprecated, use //third_party/tensorflow/compiler/xla/hlo/builder:value_inference
-# instead.
 cc_library(
     name = "value_inference",
     hdrs = ["value_inference.h"],
+    deprecation = "This library is deprecated. Use //third_party/tensorflow/compiler/xla/hlo/builder:value_inference instead.",
     visibility = ["//visibility:public"],
     deps = [
         "//xla/hlo/builder:value_inference",
     ],
 )
 
-# Deprecated, use //third_party/tensorflow/compiler/xla/hlo/builder:xla_builder
-# instead.
 cc_library(
     name = "xla_builder",
     hdrs = ["xla_builder.h"],
+    deprecation = "This library is deprecated. Use //third_party/tensorflow/compiler/xla/hlo/builder:xla_builder instead.",
     visibility = ["//visibility:public"],
     deps = [
         "//xla/hlo/builder:xla_builder",

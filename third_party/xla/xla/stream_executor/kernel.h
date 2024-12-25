@@ -94,8 +94,6 @@ limitations under the License.
 
 namespace stream_executor {
 
-class Kernel;
-
 //===----------------------------------------------------------------------===//
 // Kernel metadata
 //===----------------------------------------------------------------------===//
@@ -230,7 +228,7 @@ class Kernel {
     args_packing_ = std::move(args_packing);
   }
 
-  std::string_view name() const { return name_; }
+  absl::string_view name() const { return name_; }
   void set_name(absl::string_view name);
 
  private:

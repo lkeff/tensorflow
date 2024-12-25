@@ -81,7 +81,7 @@ class RaggedRangeOp : public OpKernel {
       T limit = broadcast_limits ? limits(0) : limits(row);
       T delta = broadcast_deltas ? deltas(0) : deltas(row);
       OP_REQUIRES(context, delta != 0, InvalidArgument("Requires delta != 0"));
-      uint64_t size;  // The number of elements in the specified range.
+      SPLITS_TYPE size;  // The number of elements in the specified range.
       if (((delta > 0) && (limit < start)) ||
           ((delta < 0) && (limit > start))) {
         size = 0;
@@ -95,17 +95,22 @@ class RaggedRangeOp : public OpKernel {
           range = static_cast<uint64_t>(Eigen::numext::abs(limit - start));
         }
 
-        size = Eigen::divup(range,
-                            static_cast<uint64_t>(Eigen::numext::abs(delta)));
+        uint64_t size_unsigned = Eigen::divup(
+            range, static_cast<uint64_t>(Eigen::numext::abs(delta)));
+        OP_REQUIRES(context,
+                    size_unsigned <= std::numeric_limits<SPLITS_TYPE>::max(),
+                    InvalidArgument("Requires ((limit - start) / delta) <= ",
+                                    std::numeric_limits<SPLITS_TYPE>::max()));
+        size = static_cast<SPLITS_TYPE>(size_unsigned);
       } else {
         // The following is copied from tensorflow::RangeOp::Compute().
         auto size_auto =
             Eigen::numext::ceil(Eigen::numext::abs((limit - start) / delta));
         OP_REQUIRES(
-            context, size_auto <= std::numeric_limits<int64_t>::max(),
+            context, size_auto <= std::numeric_limits<SPLITS_TYPE>::max(),
             errors::InvalidArgument("Requires ((limit - start) / delta) <= ",
-                                    std::numeric_limits<int64_t>::max()));
-        size = static_cast<uint64_t>(size_auto);
+                                    std::numeric_limits<SPLITS_TYPE>::max()));
+        size = static_cast<SPLITS_TYPE>(size_auto);
       }
       OP_REQUIRES(context, size >= 0, InvalidArgument("Requires size >= 0"));
       OP_REQUIRES(
@@ -130,7 +135,9 @@ class RaggedRangeOp : public OpKernel {
       T delta = broadcast_deltas ? deltas(0) : deltas(row);
       for (SPLITS_TYPE i = 0; i < row_size; ++i) {
         rt_dense_values(value_index++) = T(value);
-        value += delta;
+        if (i < row_size - 1) {
+          value += delta;
+        }
       }
     }
   }

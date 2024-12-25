@@ -54,9 +54,9 @@ limitations under the License.
 #include "tensorflow/compiler/tf2xla/xla_compiler.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
-#include "xla/client/xla_builder.h"
-#include "xla/client/xla_computation.h"
 #include "xla/debug_options_flags.h"
+#include "xla/hlo/builder/xla_builder.h"
+#include "xla/hlo/builder/xla_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/translate/hlo_to_mhlo/hlo_to_mlir_hlo.h"
 #include "xla/hlo/translate/mhlo_to_hlo/type_to_shape.h"
@@ -218,7 +218,7 @@ class XlaCallModuleOp : public XlaOpKernel {
     VLOG(3) << "Initializing XlaCallModuleOp on " << compilation_platform_;
     {
       auto loader = XlaCallModuleLoader::Create(
-          &context_, version, std::move(module_str), std::move(disabled_checks),
+          &context_, version, module_str, std::move(disabled_checks),
           std::move(platforms),
           /*num_invocation_args=*/ctx->num_inputs(),
           main_has_token_input_output);

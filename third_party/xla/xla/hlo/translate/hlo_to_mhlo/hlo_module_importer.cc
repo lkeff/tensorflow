@@ -30,7 +30,6 @@ limitations under the License.
 #include "xla/hlo/translate/hlo_to_mhlo/hlo_function_importer.h"
 #include "xla/hlo/translate/hlo_to_mhlo/module_attributes_importer.h"
 #include "xla/mlir_hlo/mhlo/IR/hlo_ops.h"
-#include "xla/xla.pb.h"
 #include "tsl/platform/errors.h"
 #include "tsl/platform/statusor.h"
 
@@ -83,7 +82,8 @@ absl::Status HloModuleImporter::Import(const HloModule& hlo_module) {
                            flatten_computation_args_result_)
                            .status());
 
-  ImportEntryComputationLayoutAndTiles(hlo_module, module, builder_);
+  ImportEntryComputationLayoutAndTiles(
+      hlo_module, module, flatten_computation_args_result_, builder_);
   return absl::OkStatus();
 }
 
