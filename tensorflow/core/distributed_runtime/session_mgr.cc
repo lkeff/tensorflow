@@ -208,7 +208,8 @@ absl::Status SessionMgr::CreateSession(
     }
     auto device_mgr =
         std::make_unique<StaticDeviceMgr>(std::move(renamed_devices));
-    LookupLocalDevice cb = [&device_mgr](StringPiece name, Device** device) {
+    LookupLocalDevice cb = [&device_mgr](absl::string_view name,
+                                         Device** device) {
       return device_mgr->LookupDevice(name, device);
     };
     AsRemoteDevices(worker_env_->env, cluster_device_attributes, cb,
@@ -288,9 +289,8 @@ absl::Status SessionMgr::CreateSession(
 
     // Initialize coordination service if it is the leader.
     if (IsMultiClientLeader(server_def, coordination_config)) {
-      coordination_service_ =
-          tsl::CoordinationServiceInterface::EnableCoordinationService(
-              worker_env_->env, coordination_config, std::move(client_cache));
+      coordination_service_ = tsl::CoordinationService::Create(
+          worker_env_->env, coordination_config, std::move(client_cache));
       if (coordination_handler_ != nullptr) {
         coordination_handler_->SetServiceInstance(coordination_service_.get());
       }

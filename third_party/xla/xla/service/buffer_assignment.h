@@ -180,7 +180,7 @@ class BufferAllocation {
   // to identify the memory range that a LogicalBuffer corresponds to.
   class Slice {
    public:
-    Slice() {}
+    Slice() = default;
     Slice(const BufferAllocation* allocation, int64_t offset, int64_t size)
         : allocation_(allocation), offset_(offset), size_(size) {}
 
@@ -215,6 +215,13 @@ class BufferAllocation {
     }
 
     std::string ToString() const;
+
+    absl::StatusOr<xla::buffer_assignment::BufferAllocationSliceProto> ToProto()
+        const;
+
+    static absl::StatusOr<BufferAllocation::Slice> FromProto(
+        const xla::buffer_assignment::BufferAllocationSliceProto& proto,
+        const std::vector<BufferAllocation>& buffer_allocations);
 
    private:
     const BufferAllocation* allocation_ = nullptr;
@@ -373,7 +380,7 @@ class BufferAllocation {
 };
 
 // Add stream operators for nicer output of CHECK/RET_CHECK failures.
-std::ostream& operator<<(std::ostream& out, const BufferAllocation& s);
+std::ostream& operator<<(std::ostream& out, const BufferAllocation& buffer);
 std::ostream& operator<<(std::ostream& out, const BufferAllocation::Slice& s);
 
 // This class encapsulates an assignment of the LogicalBuffers in an XLA

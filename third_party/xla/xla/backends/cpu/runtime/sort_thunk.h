@@ -16,7 +16,6 @@ limitations under the License.
 #ifndef XLA_BACKENDS_CPU_RUNTIME_SORT_THUNK_H_
 #define XLA_BACKENDS_CPU_RUNTIME_SORT_THUNK_H_
 
-#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -24,13 +23,10 @@ limitations under the License.
 #include <vector>
 
 #include "absl/base/call_once.h"
-#include "absl/base/thread_annotations.h"
 #include "absl/functional/any_invocable.h"
 #include "absl/status/statusor.h"
-#include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
 #include "xla/backends/cpu/runtime/thunk.h"
-#include "xla/service/buffer_assignment.h"
 #include "xla/shape.h"
 #include "xla/tsl/concurrency/async_value_ref.h"
 
@@ -65,6 +61,15 @@ class SortThunk final : public Thunk {
   tsl::AsyncValueRef<ExecuteEvent> Execute(const ExecuteParams& params) final;
 
   BufferUses buffer_uses() const final;
+
+  std::optional<SortDirection> direction() const { return direction_; }
+  int64_t dimension() const { return dimension_; }
+  bool is_stable() const { return is_stable_; }
+  const std::vector<Input>& inputs() const { return inputs_; }
+
+  const std::string& comparator_name() const { return comparator_name_; }
+
+  bool has_less_than() const { return less_than_.ok(); }
 
  private:
   SortThunk(Info info, absl::Span<const Input> inputs, int64_t dimension,

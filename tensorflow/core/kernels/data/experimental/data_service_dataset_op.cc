@@ -265,7 +265,7 @@ class DataServiceDatasetOp::Dataset : public DatasetBase {
     inputs.push_back(iteration_counter_handle);
 
     // Attributes
-    std::vector<std::pair<StringPiece, AttrValue>> attrs;
+    std::vector<std::pair<absl::string_view, AttrValue>> attrs;
     AttrValue task_refresh_interval_hint_ms;
     b->BuildAttrValue(absl::ToInt64Milliseconds(task_refresh_interval_),
                       &task_refresh_interval_hint_ms);
@@ -665,7 +665,7 @@ void DataServiceDatasetOp::MakeDataset(OpKernelContext* ctx,
       iteration_counter_handle.container(), iteration_counter_handle.name(),
       &iteration_counter);
   bool owns_resource = false;
-  if (errors::IsNotFound(s)) {
+  if (absl::IsNotFound(s)) {
     owns_resource = true;
     static std::atomic<int64_t> resource_id_counter(0);
     const std::string& container = ctx->resource_manager()->default_container();

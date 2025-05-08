@@ -30,10 +30,10 @@ limitations under the License.
 
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
-#include "tsl/platform/logging.h"
-#include "tsl/platform/macros.h"
+#include "xla/tsl/platform/logging.h"
+#include "xla/tsl/platform/macros.h"
+#include "xla/tsl/platform/types.h"
 #include "tsl/platform/stringprintf.h"
-#include "tsl/platform/types.h"
 
 namespace tsl {
 
@@ -233,7 +233,7 @@ size_t FloatToBuffer(float value, char* buffer) {
   DCHECK(snprintf_result > 0 && snprintf_result < kFastToBufferSize);
 
   float parsed_value;
-  if (!safe_strtof(buffer, &parsed_value) || parsed_value != value) {
+  if (!absl::SimpleAtof(buffer, &parsed_value) || parsed_value != value) {
     snprintf_result =
         snprintf(buffer, kFastToBufferSize, "%.*g", FLT_DIG + 3, value);
 
@@ -241,6 +241,18 @@ size_t FloatToBuffer(float value, char* buffer) {
     DCHECK(snprintf_result > 0 && snprintf_result < kFastToBufferSize);
   }
   return snprintf_result;
+}
+
+strings_internal::AlphaNumBuffer LegacyPrecision(double d) {
+  strings_internal::AlphaNumBuffer result;
+  result.size = DoubleToBuffer(d, result.data.data());
+  return result;
+}
+
+strings_internal::AlphaNumBuffer LegacyPrecision(float f) {
+  strings_internal::AlphaNumBuffer result;
+  result.size = FloatToBuffer(f, result.data.data());
+  return result;
 }
 
 std::string FpToString(Fprint fp) {

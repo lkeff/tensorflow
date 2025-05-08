@@ -89,10 +89,6 @@ class GpuCompiler : public LLVMCompiler {
   absl::StatusOr<std::unique_ptr<AotCompilationResult>>
   LoadAotCompilationResult(const std::string& serialized_aot_result) override;
 
-  // Stateless version of the same function.
-  static absl::StatusOr<std::unique_ptr<AotCompilationResult>>
-  LoadAotCompilationResultStatic(const std::string& serialized_aot_result);
-
   absl::StatusOr<std::unique_ptr<AotCompilationResult>> Export(
       Executable* executable) const override;
 
@@ -237,10 +233,11 @@ class GpuCompiler : public LLVMCompiler {
       const HloModuleConfig& module_config, llvm::Module* llvm_module,
       const stream_executor::DeviceDescription& device_description,
       bool relocatable, const HloModule* debug_module,
-      const CompileOptions& options) = 0;
+      const CompileOptions& options, std::optional<int> shard_number) = 0;
 
-  absl::Status PrepareHloModuleForIrEmitting(
-      HloModule* hlo_module, const se::DeviceDescription& device_description);
+  // Inserts and optimizes mandatory copies. Necessary for correctness.
+  absl::Status RunPreSchedulingCopyInsertion(
+      HloModule& hlo_module, const se::DeviceDescription& device_description);
 
   virtual absl::StatusOr<std::vector<uint8_t>> LinkModules(
       const stream_executor::DeviceDescription& device_description,
@@ -263,6 +260,11 @@ class GpuCompiler : public LLVMCompiler {
 
   GpuCompiler(const GpuCompiler&) = delete;
   GpuCompiler& operator=(const GpuCompiler&) = delete;
+
+  // Returns the LLVM command line options that we use for compilation.
+  // THey need to be set globally whenever we call into LLVM.
+  virtual std::vector<std::string> GetLLVMCommandLineOptions(
+      const DebugOptions& debug_options) const = 0;
 };
 
 }  // namespace gpu

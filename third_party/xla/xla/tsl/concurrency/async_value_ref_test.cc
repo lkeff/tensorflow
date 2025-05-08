@@ -22,6 +22,7 @@ limitations under the License.
 #include <cstdint>
 #include <memory>
 #include <utility>
+#include <vector>
 
 #include "absl/functional/any_invocable.h"
 #include "absl/status/status.h"
@@ -29,8 +30,8 @@ limitations under the License.
 #include "absl/types/span.h"
 #include "xla/tsl/concurrency/async_value.h"
 #include "xla/tsl/concurrency/ref_count.h"
-#include "tsl/platform/test.h"
-#include "tsl/platform/test_benchmark.h"
+#include "xla/tsl/platform/test.h"
+#include "xla/tsl/platform/test_benchmark.h"
 
 namespace tsl {
 
@@ -906,6 +907,14 @@ TEST(AsyncValueRefTest, RecursiveOwnership) {
   // Run all callbacks and as a side effect destroy the `state` object.
   state_ptr->value.SetStateConcrete();
   EXPECT_EQ(counter, 1 + 2 + 3);
+}
+
+TEST(AsyncValueRefTest, CountDownZero) {
+  CountDownAsyncValueRef<int32_t> count_down_ref(0, 42);
+  AsyncValueRef<int32_t> ref = count_down_ref.AsRef();
+
+  EXPECT_TRUE(ref.IsAvailable());
+  EXPECT_EQ(*ref, 42);
 }
 
 TEST(AsyncValueRefTest, CountDownSuccess) {

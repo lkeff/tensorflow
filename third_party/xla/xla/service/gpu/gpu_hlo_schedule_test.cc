@@ -21,12 +21,17 @@ limitations under the License.
 #include <memory>
 #include <optional>
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "absl/algorithm/container.h"
+#include "absl/base/log_severity.h"
 #include "absl/log/log.h"
+#include "absl/log/log_sink.h"
+#include "absl/log/scoped_mock_log.h"
 #include "absl/status/status.h"
 #include "absl/strings/string_view.h"
 #include "xla/hlo/analysis/hlo_ordering.h"
@@ -34,8 +39,11 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_instructions.h"
+#include "xla/hlo/ir/hlo_module.h"
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/hlo/ir/hlo_schedule.h"
+#include "xla/hlo/testlib/filecheck.h"
+#include "xla/hlo/testlib/verified_hlo_module.h"
 #include "xla/hlo/utils/hlo_query.h"
 #include "xla/service/backend.h"
 #include "xla/service/gpu/gpu_compiler.h"
@@ -43,20 +51,20 @@ limitations under the License.
 #include "xla/shape.h"
 #include "xla/shape_util.h"
 #include "xla/stream_executor/device_description.h"
-#include "xla/tests/filecheck.h"
 #include "xla/tests/hlo_test_base.h"
 #include "xla/tests/test_utils.h"
-#include "xla/tests/verified_hlo_module.h"
 #include "xla/tsl/lib/core/status_test_util.h"
-#include "tsl/platform/status.h"
-#include "tsl/platform/status_matchers.h"
-#include "tsl/platform/statusor.h"
+#include "xla/tsl/platform/logging.h"
+#include "xla/tsl/platform/status.h"
+#include "xla/tsl/platform/statusor.h"
 #include "tsl/profiler/protobuf/profiled_instructions.pb.h"
 
 namespace xla {
 namespace gpu {
 
+using ::testing::_;
 using ::testing::ElementsAre;
+using ::testing::EndsWith;
 using ::tsl::testing::StatusIs;
 
 class GpuHloScheduleTest : public HloTestBase {
@@ -106,7 +114,6 @@ class GpuHloScheduleTest : public HloTestBase {
     // Verify that the fingerprint of HLO prior to LHS is present.
     const FrontendAttributes& attrs = module->frontend_attributes();
     auto it = attrs.map().find(kFingerprintBeforeLHS);
-
     // The fingerprint is 128 bits stored as a hex string (128/4 hex digits).
     return it != attrs.map().end() && it->second.size() == 128 / 4;
   }
@@ -1700,6 +1707,109 @@ TEST_F(GpuHloScheduleTest, CopyStartDoneScheduled) {
 // CHECK: tanh.14 = f32[512,1024]{1,0} tanh
 // CHECK: copy-done.3 = f32[512,1024]{1,0} copy-done
 )"));
+}
+
+// This test verifies that the GPU scheduler doesn't count CPU memory usage
+// in the GPU peak memory usage.
+TEST_F(GpuHloScheduleTest, DiscountCPUMemoryFromGPUPeakMemoryUsage) {
+  constexpr absl::string_view kPeakMemoryUsageWithCpuOffload = R"(
+  HloModule offloading, input_output_alias= { {0}: (1, {}, must-alias) }
+
+  ENTRY main {
+    param.0 = f32[1024]{0:S(5)} parameter(0)
+    param.1 = f32[1024]{0} parameter(1)
+    copy-start.h2d = (f32[1024]{0}, f32[1024]{0:S(5)}, u32[]) copy-start(param.0)
+    copy-done.h2d = f32[1024]{0} copy-done(copy-start.h2d)
+    copy-start.d2h = (f32[1024]{0:S(5)}, f32[1024]{0}, u32[]) copy-start(param.1)
+    copy-done.d2h = f32[1024]{0:S(5)} copy-done(copy-start.d2h)
+    ROOT t = (f32[1024]{0}, f32[1024]{0:S(5)}) tuple(copy-done.h2d, copy-done.d2h)
+  })";
+
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto module, ParseAndReturnVerifiedModule(kPeakMemoryUsageWithCpuOffload,
+                                                GetModuleConfig({})));
+  int64_t pointer_size =
+      dynamic_cast<GpuCompiler*>(backend().compiler())->GetPointerSize();
+  int64_t peak_memory_bytes = -1;
+  TF_ASSERT_OK_AND_ASSIGN(auto schedule,
+                          ScheduleGpuModuleWithMemoryScheduler(
+                              module.get(), pointer_size, &peak_memory_bytes));
+  TF_CHECK_OK(module->set_schedule(std::move(schedule)));
+  // Expected size = 4096 (buffer size) + 24 (tuple size) + 4 (prefetch index)
+  EXPECT_LT(peak_memory_bytes, 4200);
+
+  // Let's verify that we store one parameter on the CPU first before loading
+  // another parameter from the CPU to minimize peak memory usage.
+  EXPECT_TRUE(*RunFileCheck(module->ToString(), R"(
+// CHECK: ENTRY
+// CHECK: copy-start.d2h = (f32[1024]{0:S(5)}, f32[1024]{0}, u32[]) copy-start
+// CHECK: copy-done.d2h = f32[1024]{0:S(5)} copy-done
+// CHECK: copy-start.h2d = (f32[1024]{0}, f32[1024]{0:S(5)}, u32[]) copy-start
+// CHECK: copy-done.h2d = f32[1024]{0} copy-done
+)"));
+}
+
+TEST_F(GpuHloScheduleTest, ReturnsValidScheduleMetadata) {
+  constexpr absl::string_view kHloText = R"(
+    HloModule m
+
+    ENTRY ar {
+      p0 = f32[32,32] parameter(0)
+      p1 = f32[32,32] parameter(1)
+
+      ROOT _ = f32[32,32]{1,0} custom-call(p0, p1),
+        custom_call_target="__cublas$gemm"
+    })";
+  HloModuleConfig module_config;
+  constexpr uint64_t kMemoryLimitLarge = 22000;
+  module_config.set_device_memory_size(kMemoryLimitLarge);
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto module, ParseAndReturnVerifiedModule(kHloText, module_config));
+
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto metadata,
+      ScheduleGpuModule(
+          module.get(), /*pointer_size=*/8,
+          backend().default_stream_executor()->GetDeviceDescription()));
+  EXPECT_GT(metadata.scheduler_mem_limit, 0);
+}
+
+// This test verifies that the scheduling logs an error if the size of
+// input/output arguments exceeds the base limit.
+TEST_F(GpuHloScheduleTest, LogAnErrorWhenArgumentSizeExceedsMemoryLimit) {
+  constexpr absl::string_view kHloText = R"(
+    HloModule m
+
+    ENTRY ar {
+      p0 = f32[32,32] parameter(0)
+      p1 = f32[32,32] parameter(1)
+
+      ROOT _ = f32[32,32]{1,0} custom-call(p0, p1),
+        custom_call_target="__cublas$gemm"
+    })";
+  HloModuleConfig module_config;
+  constexpr uint64_t kMemoryLimitSmall = 1;
+  module_config.set_device_memory_size(kMemoryLimitSmall);
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto module, ParseAndReturnVerifiedModule(kHloText, module_config));
+
+  absl::ScopedMockLog mock_log(absl::MockLogDefault::kIgnoreUnexpected);
+  // absl::ScopedMockLog only works if we're actually using ABSL logging, and
+  // TSL supports a homegrown logging implementation, so we should only check
+  // the log is emitted when ABSL logging is used.
+  if constexpr (std::is_same_v<absl::LogSink, tsl::TFLogSink>) {
+    EXPECT_CALL(mock_log,
+                Log(absl::LogSeverity::kError, _,
+                    EndsWith("This indicates an error in the calculation!")))
+        .Times(1);
+  }
+  mock_log.StartCapturingLogs();
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto metadata,
+      ScheduleGpuModule(
+          module.get(), /*pointer_size=*/8,
+          backend().default_stream_executor()->GetDeviceDescription()));
+  EXPECT_EQ(metadata.scheduler_mem_limit, 0);
 }
 
 }  // namespace gpu

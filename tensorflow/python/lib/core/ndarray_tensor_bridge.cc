@@ -198,11 +198,26 @@ absl::Status TF_DataType_to_PyArray_TYPE(TF_DataType tf_datatype,
     case TF_FLOAT8_E4M3FN:
       *out_pyarray_type = custom_dtypes.float8_e4m3fn;
       break;
+    case TF_FLOAT8_E4M3FNUZ:
+      *out_pyarray_type = custom_dtypes.float8_e4m3fnuz;
+      break;
+    case TF_FLOAT8_E4M3B11FNUZ:
+      *out_pyarray_type = custom_dtypes.float8_e4m3b11fnuz;
+      break;
+    case TF_FLOAT8_E5M2FNUZ:
+      *out_pyarray_type = custom_dtypes.float8_e5m2fnuz;
+      break;
     case TF_INT4:
       *out_pyarray_type = custom_dtypes.int4;
       break;
     case TF_UINT4:
       *out_pyarray_type = custom_dtypes.uint4;
+      break;
+    case TF_INT2:
+      *out_pyarray_type = custom_dtypes.int2;
+      break;
+    case TF_UINT2:
+      *out_pyarray_type = custom_dtypes.uint2;
       break;
     default:
       return errors::Internal("Tensorflow type ", tf_datatype,

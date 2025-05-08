@@ -37,8 +37,8 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_instructions.h"
 #include "xla/service/buffer_assignment.h"
+#include "xla/service/cpu/elemental_ir_emitter.h"
 #include "xla/service/cpu/ir_emitter.h"
-#include "xla/service/llvm_ir/ir_array.h"
 #include "xla/service/llvm_ir/loop_emitter.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
@@ -69,30 +69,35 @@ class IrEmitter2 {
   friend class IrEmitter2Test;
 
  private:
-  struct KernelPrototype;
+  using KernelParameter = KernelApiIrBuilder::KernelParameter;
+  using KernelPrototype = KernelApiIrBuilder::KernelPrototype;
 
  public:
   IrEmitter2(const HloModule& hlo_module, llvm::Module* module,
              IrEmitter* nested_ir_emitter);
-
-  // Kernel parameter (argument or result buffer) passed to a kernel function.
-  // We rely on buffer allocation slice information to infer buffer aliasing
-  // scopes for LLVM codegen.
-  struct KernelParameter {
-    Shape shape;
-    BufferAllocation::Slice slice;
-  };
 
   // Emitted kernel information that defines how to launch it at run time.
   struct KernelInfo {
     explicit KernelInfo(KernelPrototype prototype,
                         const se::BlockDim& block_dims,
                         const se::ThreadDim& thread_dims);
+    explicit KernelInfo(const std::string& name, const se::BlockDim& block_dims,
+                        const se::ThreadDim& thread_dims,
+                        const absl::flat_hash_set<int64_t>& invariant_arguments,
+                        absl::string_view backend_extra_options = "");
 
     std::string name;
     se::BlockDim block_dims;
     se::ThreadDim thread_dims;
     absl::flat_hash_set<int64_t> invariant_arguments;
+    // CSV with extra compilation options. Overrides the
+    // xla_backend_extra_options flag in ModuleConfig.
+    // This is here because currently in IrEmitter2 all codegen'ed objects
+    // end up being linked in the same LLVM::Module. If we had one module
+    // per object, we could simply embed these options in the object.
+    // TODO(ecg): move IrEmitter2 to a model where we have one object per
+    // LLVM::Module. Or migrate IrEmitter2 to something better.
+    std::string backend_extra_options;
   };
 
   // Emitted comparator function information (for sort operation).
@@ -105,29 +110,12 @@ class IrEmitter2 {
 
   absl::Span<const ComparatorInfo> comparators() const { return comparators_; }
 
-  // Emits an elemental host kernel for the given HLO instruction.
-  absl::StatusOr<KernelInfo> EmitElementalHostKernel(
-      const HloInstruction* instr);
-
   // Emits a host kernel for the pad instruction.
   absl::StatusOr<KernelInfo> EmitPadHostKernel(const HloInstruction* pad);
 
   // Emits a host kernel for the given fusion instruction.
   absl::StatusOr<KernelInfo> EmitFusionHostKernel(
       const HloFusionInstruction* fusion);
-
-  // Emits a host kernel for the given reduction instruction.
-  absl::StatusOr<KernelInfo> EmitReductionHostKernel(
-      const HloInstruction* instr);
-
-  // Emits a host kernel for the given dot instruction. Small dot operations
-  // are emitted as LLVM IR directly, while larger ones are emitted as a dot
-  // thunk that calls into libraries.
-  absl::StatusOr<KernelInfo> EmitDotHostKernel(const HloInstruction* instr);
-
-  // Emits a host kernel for the given concatenate instruction.
-  absl::StatusOr<KernelInfo> EmitConcatenateHostKernel(
-      const HloInstruction* instr);
 
   // Emits a host kernel for the given dot fusion instruction (output fusion).
   absl::StatusOr<KernelInfo> EmitDotFusionHostKernel(
@@ -144,35 +132,12 @@ class IrEmitter2 {
   // Emits a comparator function for the given sort instruction.
   absl::StatusOr<ComparatorInfo> EmitSortComparator(HloComputation* comparator);
 
+  bool CanUpdateDynamicSliceInPlace(const HloInstruction* update) const;
+
+  bool IsSupportedByFusionEmitter(const HloFusionInstruction* fusion) const;
+
  private:
   class ElementalIrEmitter;
-
-  // A kernel function prototype with all the LLVM values that might be needed
-  // to emit the actual kernel body.
-  struct KernelPrototype {
-    llvm::Function* function;
-    llvm::BasicBlock* return_block;
-
-    // LLVM values identifying kernel invocation thread coordinates.
-    KernelApiIrBuilder::ThreadDims thread_dims;
-    KernelApiIrBuilder::ThreadId thread;
-
-    // LLVM values corresponding to the kernel arguments and results arrays. All
-    // tuples are flattened as we do not have any tuples at run time and only
-    // read and write data from/to leaf arrays.
-    std::vector<llvm_ir::IrArray> arguments;
-    std::vector<llvm_ir::IrArray> results;
-
-    // Set containing all invariant (read-only) buffers indices. A buffer is
-    // read-only if it is not aliased with any result.
-    absl::flat_hash_set<int64_t> invariant_arguments;
-  };
-
-  // Emits a host kernel prototype and prepares function for emitting kernel
-  // body into it.
-  absl::StatusOr<KernelPrototype> EmitKernelPrototype(
-      absl::string_view name, absl::Span<const KernelParameter> arguments,
-      absl::Span<const KernelParameter> results);
 
   // Emits a host kernel prototype for the given HLO instruction.
   absl::StatusOr<KernelPrototype> EmitKernelPrototype(
@@ -190,29 +155,9 @@ class IrEmitter2 {
     std::vector<int64_t> outer_dimension_partitions;
   };
 
-  // Returns the buffer allocation slice assigned to the given instruction at
-  // the given shape index. Instruction must have a unique slice assigned to it!
-  absl::StatusOr<BufferAllocation::Slice> GetAllocationSlice(
-      const HloInstruction* instruction, const ShapeIndex& index = {});
-
-  // We do not materialize buffers for tuples at run time, and work only with
-  // leaf arrays. These are the helper functions to flatten HLO instruction
-  // parameters and results into a list of leaf shapes.
-  absl::StatusOr<std::vector<KernelParameter>> GetKernelArgumentsParameters(
-      const HloInstruction* instruction);
-  absl::StatusOr<std::vector<KernelParameter>> GetKernelResultsParameters(
-      const HloInstruction* instruction);
-
-  // Verifies kernel parameters preconditions that are required for codegen.
-  absl::Status VerifyKernelParameters(
-      absl::Span<const KernelParameter> arguments,
-      absl::Span<const KernelParameter> results);
-
   // Returns parallel config for the given instruction or std::nullopt if
   // the instruction has to be compiled to a single threaded loop.
   std::optional<ParallelConfig> GetParallelConfig(const HloInstruction* instr);
-
-  absl::Status CanDoFastConcatenate(const HloInstruction* concatenate) const;
 
   // Emits LLVM IR that computes parallel partition bounds from the call frame's
   // block and thread dimensions and parallel execution config.
@@ -229,9 +174,6 @@ class IrEmitter2 {
       const KernelPrototype& kernel_prototype,
       const llvm_ir::ElementGenerator& element_generator);
 
-  absl::Status EmitNestedComputation(const HloComputation& callee,
-                                     absl::string_view name, bool is_reducer);
-
   bool fast_min_max() const;
 
   // Returns the number of bytes within the shape.
@@ -240,6 +182,8 @@ class IrEmitter2 {
   // Given a load instruction, annotate the load's result with the invariant
   // load metadata.
   void AttachInvariantLoadMetadataForLoad(llvm::LoadInst* instr) const;
+
+  CpuElementalIrEmitter ElementalIrEmmiterFactory(llvm::IRBuilderBase* b) const;
 
   const HloModule& hlo_module_;
   llvm::Module* module_;

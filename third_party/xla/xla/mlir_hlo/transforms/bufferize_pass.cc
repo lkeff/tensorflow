@@ -109,7 +109,6 @@ class CustomBufferizeTypeConverter : public mlir::TypeConverter {
     addConversion([](UnrankedTensorType type) -> Type {
       return UnrankedMemRefType::get(type.getElementType(), 0);
     });
-    addArgumentMaterialization(materializeToTensor);
     addSourceMaterialization(materializeToTensor);
     addTargetMaterialization([](OpBuilder& builder, BaseMemRefType type,
                                 ValueRange inputs, Location loc) -> Value {
@@ -155,7 +154,6 @@ static bufferization::BufferizationOptions getPartialBufferizationOptions() {
   bufferization::BufferizationOptions options;
   options.allowUnknownOps = true;
   options.copyBeforeWrite = true;
-  options.enforceAliasingInvariants = false;
   options.unknownTypeConverterFn =
       [](Value value, Attribute memorySpace,
          const bufferization::BufferizationOptions& options) {

@@ -1,105 +1,84 @@
-diff --ruN a/stablehlo/build_tools/math/generate_ChloDecompositionPatternsMath.py b/stablehlo/build_tools/math/generate_ChloDecompositionPatternsMath.py
---- stablehlo/build_tools/math/generate_ChloDecompositionPatternsMath.py
-+++ stablehlo/build_tools/math/generate_ChloDecompositionPatternsMath.py
-@@ -71,8 +71,15 @@
+diff --ruN a/stablehlo/stablehlo/dialect/StablehloOps.cpp b/stablehlo/stablehlo/dialect/StablehloOps.cpp
+--- stablehlo/stablehlo/dialect/StablehloOps.cpp
++++ stablehlo/stablehlo/dialect/StablehloOps.cpp
+@@ -2635,6 +2635,38 @@
+                           inferredReturnTypes);
+ }
  
-   output_file = os.path.relpath(
-       os.path.normpath(
--          os.path.join(os.path.dirname(__file__), "..", "..", "stablehlo",
--                       "transforms", output_filename)),
-+          os.path.join(
-+              os.path.dirname(__file__),
-+              "..",
-+              "..",
-+              "stablehlo",
-+              "transforms",
-+              output_filename,
-+          )
-+      ),
-       os.getcwd(),
-   )
++class FoldConstantCaseOp : public OpRewritePattern<CaseOp> {
++ public:
++  explicit FoldConstantCaseOp(MLIRContext* context)
++      : OpRewritePattern<CaseOp>(context) {}
++  LogicalResult matchAndRewrite(CaseOp op,
++                                PatternRewriter& rewriter) const override {
++    DenseIntElementsAttr branch;
++    if (!matchPattern(op.getIndex(), m_Constant(&branch))) return failure();
++
++    int index = *branch.getValues<int>().begin();
++    if (index >= op.getBranches().size() || index < 0) {
++      return failure();
++    }
++
++    Block &block = op.getBranches()[index].back();
++    IRMapping mapping;
++    for (auto &block_op : block.without_terminator()) {
++      rewriter.clone(block_op, mapping);
++    }
++    rewriter.replaceOp(
++        op, llvm::to_vector(llvm::map_range(
++            block.getTerminator()->getOperands(),
++            [&](Value v) { return mapping.lookupOrDefault(v); })));
++      return success();
++  }
++};
++
++void CaseOp::getCanonicalizationPatterns(RewritePatternSet& results,
++                                         MLIRContext* context) {
++  results.add<FoldConstantCaseOp>(context);
++}
++
+ //===----------------------------------------------------------------------===//
+ // SliceOp
+ //===----------------------------------------------------------------------===//
+diff --ruN a/stablehlo/stablehlo/dialect/StablehloOps.td b/stablehlo/stablehlo/dialect/StablehloOps.td
+--- stablehlo/stablehlo/dialect/StablehloOps.td
++++ stablehlo/stablehlo/dialect/StablehloOps.td
+@@ -1392,7 +1392,7 @@
+   );
  
-@@ -105,7 +112,8 @@
-     func = getattr(fa.algorithms, fname, None)
-     if func is None:
-       warnings.warn(
--          f"{fa.algorithms.__name__} does not define {fname}. Skipping.")
-+          f"{fa.algorithms.__name__} does not define {fname}. Skipping."
-+      )
-       continue
-     ctx = fa.Context(paths=[fa.algorithms],
-                      parameters=dict(rewrite_keep_integer_literals=True))
-@@ -116,14 +124,15 @@
-     sources[-1] += src
-   source = "\n\n".join(sources) + "\n"
+   let regions = (region VariadicRegion<SizedRegion<1>>:$branches /*case_i2*/);
+-
++  let hasCanonicalizer = 1;
+   let results = (outs Variadic<HLO_TensorOrPerAxisQuantizedTensorOrToken>);
+ }
  
--  if chloname.startswith('StableHLO_'):
-+  if chloname.startswith("StableHLO_"):
-     # an ugly hack to fix the definition of stablehlo complex math
-     # functions. TODO(pearu): add the corresponding feature to
-     # functional_algorithms stablehlo printer
--    NameOp = chloname.split('_', 1)[1]
-+    NameOp = chloname.split("_", 1)[1]
-     source = source.replace(
--        f'def : Pat<({chloname}',
--        f'def {NameOp}_ComplexElementType_ComplexMathExpander : Pat<({chloname}'
-+        f"def : Pat<({chloname}",
-+        f"def {NameOp}_ComplexElementType_ComplexMathExpander :"
-+        f" Pat<({chloname}",
-     )
+diff --ruN a/stablehlo/stablehlo/tests/canonicalize.mlir b/stablehlo/stablehlo/tests/canonicalize.mlir
+--- stablehlo/stablehlo/tests/canonicalize.mlir
++++ stablehlo/stablehlo/tests/canonicalize.mlir
+@@ -0,0 +1,13 @@
++// RUN: stablehlo-opt %s -pass-pipeline='builtin.module(func.func(canonicalize{test-convergence}))' -split-input-file -allow-unregistered-dialect | FileCheck %s
++
++func.func @fold_constant_case(%arg0: tensor<i32>, %arg1: tensor<i32>) -> (tensor<i32>) {
++ %0 = "stablehlo.constant"() <{value = dense<1> : tensor<i32>}> : () -> tensor<i32>
++ %1 = "stablehlo.case"(%0) ({
++   "stablehlo.return"(%arg0) : (tensor<i32>) -> ()
++ }, {
++  "stablehlo.return"(%arg1) : (tensor<i32>) -> ()
++ }) : (tensor<i32>) -> tensor<i32>
++ return %1 : tensor<i32>
++
++// CHECK: return %arg1
++}
+diff --ruN a/stablehlo/stablehlo/transforms/StablehloRefineShapes.cpp b/stablehlo/stablehlo/transforms/StablehloRefineShapes.cpp
+--- stablehlo/stablehlo/transforms/StablehloRefineShapes.cpp
++++ stablehlo/stablehlo/transforms/StablehloRefineShapes.cpp
+@@ -1097,7 +1097,7 @@
+   size_t firstFunctionalArgument =
+       leadingTokenOperands + key.getGlobalConstants().size();
+   argIndices.set(leadingTokenOperands, firstFunctionalArgument);
+-  if (failed(func.eraseArguments(argIndices))) return failure();
++  func.eraseArguments(argIndices);
  
-   if os.path.isfile(output_file):
-diff --ruN a/stablehlo/build_tools/math/generate_tests.py b/stablehlo/build_tools/math/generate_tests.py
---- stablehlo/build_tools/math/generate_tests.py
-+++ stablehlo/build_tools/math/generate_tests.py
-@@ -64,10 +64,12 @@
-     dict(name="acosh", mpmath_name="arccosh"),
-     dict(name="atanh", mpmath_name="arctanh"),
-     dict(name="square", mpmath_name="square"),
--    dict(name="log_plus_one",
--         mpmath_name="log1p",
--         namespace="stablehlo",
--         passes="--stablehlo-complex-math-expander"),
-+    dict(
-+        name="log_plus_one",
-+        mpmath_name="log1p",
-+        namespace="stablehlo",
-+        passes="--stablehlo-complex-math-expander",
-+    ),
- ]
- 
- 
-@@ -138,13 +140,16 @@
-       params = fa.utils.function_validation_parameters(opname, dtype)
-       max_ulp_difference = op.get(
-           "max_ulp_difference",
--          params.get("max_valid_ulp_count", default_max_ulp_difference))
-+          params.get("max_valid_ulp_count", default_max_ulp_difference),
-+      )
- 
-       nmp = fa.utils.numpy_with_mpmath(
-           extra_prec_multiplier=op.get(
-               "extra_prec_multiplier",
--              params.get("extra_prec_multiplier",
--                         default_extra_prec_multiplier)),
-+              params.get(
-+                  "extra_prec_multiplier", default_extra_prec_multiplier
-+              ),
-+          ),
-           flush_subnormals=flush_subnormals,
-       )
- 
-@@ -208,8 +213,10 @@
-           continue
- 
-       f = open(fname, "w")
--      f.write(f"// RUN: stablehlo-opt {passes} %s |"
--              " stablehlo-translate --interpret\n")
-+      f.write(
-+          f"// RUN: stablehlo-opt {passes} %s |"
-+          " stablehlo-translate --interpret\n"
-+      )
-       f.write(
-           "// This file is generated, see build_tools/math/README.md for more"
-           " information.\n")
+   // Refine the remaining argument types, wrap with shape buffer custom calls.
+   SmallVector<Type> refinedTypes =
 

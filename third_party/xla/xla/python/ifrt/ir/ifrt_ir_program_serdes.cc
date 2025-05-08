@@ -33,6 +33,7 @@ limitations under the License.
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Support/LLVM.h"
 #include "xla/mlir/utils/error_util.h"
+#include "xla/python/ifrt/ir/ifrt_ir_compile_options.pb.h"
 #include "xla/python/ifrt/ir/ifrt_ir_program.h"
 #include "xla/python/ifrt/ir/ifrt_ir_program.pb.h"
 #include "xla/python/ifrt/ir/transforms/passes.h"
@@ -40,7 +41,7 @@ limitations under the License.
 #include "xla/python/ifrt/serdes.h"
 #include "xla/python/ifrt/support/module_parsing.h"
 #include "xla/status_macros.h"
-#include "tsl/platform/statusor.h"
+#include "xla/tsl/platform/statusor.h"
 
 namespace xla {
 namespace ifrt {
@@ -62,9 +63,9 @@ class IfrtIRProgramSerDes
   // serialized to a stable versioned IFRT IR representation, and the atom
   // program modules are serialized to VHLO.
   absl::StatusOr<std::string> Serialize(
-      Serializable& serializable,
+      const Serializable& serializable,
       std::unique_ptr<SerializeOptions> options) override {
-    auto& program = llvm::cast<IfrtIRProgram>(serializable);
+    const auto& program = llvm::cast<IfrtIRProgram>(serializable);
     if (program.mlir_module == nullptr) {
       return absl::InvalidArgumentError("Unable to serialize null MLIR module");
     }
@@ -95,7 +96,7 @@ class IfrtIRProgramSerDes
       if (serialize_options->version_in_place) {
         mlir_module = program.mlir_module;
       } else {
-        cloned = program.mlir_module.clone();
+        cloned = mlir::ModuleOp(program.mlir_module).clone();
         mlir_module = *cloned;
       }
       // Run the pipeline to convert IFRT IR program to a versioned artifact.
@@ -209,7 +210,8 @@ class IfrtIRCompileOptionsSerDes
   }
 
   absl::StatusOr<std::string> Serialize(
-      Serializable& serializable, std::unique_ptr<SerializeOptions>) override {
+      const Serializable& serializable,
+      std::unique_ptr<SerializeOptions>) override {
     const auto& options = llvm::cast<IfrtIRCompileOptions>(serializable);
     TF_ASSIGN_OR_RETURN(IfrtIrCompileOptionsProto options_proto,
                         options.ToProto());

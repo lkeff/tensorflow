@@ -25,15 +25,20 @@ limitations under the License.
 #include "absl/types/span.h"
 #include "xla/backends/cpu/runtime/buffer_allocations.h"
 #include "xla/backends/cpu/runtime/thunk.h"
+#include "xla/backends/cpu/runtime/thunk_testlib.h"
 #include "xla/backends/cpu/runtime/xnnpack/xnn_interop.h"
-#include "xla/service/buffer_assignment.h"
-#include "xla/service/maybe_owning_device_memory.h"
+#include "xla/literal_util.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
-#include "xla/stream_executor/device_memory.h"
 #include "xla/tsl/concurrency/async_value_ref.h"
+#include "xla/tsl/platform/env.h"
 #include "xla/tsl/platform/statusor.h"
 #include "xla/tsl/platform/test.h"
+#include "xla/tsl/platform/threadpool.h"
+#include "xla/xla_data.pb.h"
+
+#define EIGEN_USE_THREADS
+#include "unsupported/Eigen/CXX11/Tensor"
 
 namespace xla::cpu {
 namespace {
@@ -78,27 +83,26 @@ static absl::StatusOr<xnn_subgraph_t> CreateBinaryAdd(
   return subgraph;
 }
 
-TEST(XnnFusionThunkTest, ElementwiseAdd) {
-  std::vector<MaybeOwningDeviceMemory> buffers;
+class XnnFusionThunkTest : public testing::TestWithParam<bool> {
+ protected:
+  bool use_threadpool() const { return GetParam(); }
+};
 
-  std::vector<float> lhs = {1.0, 2.0, 3.0, 4.0};
-  std::vector<float> rhs = {4.0, 3.0, 2.0, 1.0};
-  std::vector<float> out(4, 0.0);
+TEST_P(XnnFusionThunkTest, ElementwiseAdd) {
+  tsl::thread::ThreadPool threads(tsl::Env::Default(), "test", 8);
+  Eigen::ThreadPoolDevice device(threads.AsEigenThreadPool(),
+                                 threads.NumThreads());
 
-  size_t size_in_bytes = lhs.size() * sizeof(float);
-  buffers.emplace_back(se::DeviceMemoryBase(lhs.data(), size_in_bytes));
-  buffers.emplace_back(se::DeviceMemoryBase(rhs.data(), size_in_bytes));
-  buffers.emplace_back(se::DeviceMemoryBase(out.data(), size_in_bytes));
+  auto lhs = LiteralUtil::CreateR1<float>({1.0, 2.0, 3.0, 4.0});
+  auto rhs = LiteralUtil::CreateR1<float>({4.0, 3.0, 2.0, 1.0});
+  auto out = LiteralUtil::CreateR1<float>({0.0, 0.0, 0.0, 0.0});
 
-  BufferAllocations allocations(buffers);
+  BufferAllocations allocations = CreateBufferAllocations(lhs, rhs, out);
 
-  BufferAllocation lhs_alloc(0, size_in_bytes, 0);
-  BufferAllocation rhs_alloc(1, size_in_bytes, 0);
-  BufferAllocation out_alloc(2, size_in_bytes, 0);
-
-  BufferAllocation::Slice lhs_slice(&lhs_alloc, 0, size_in_bytes);
-  BufferAllocation::Slice rhs_slice(&rhs_alloc, 0, size_in_bytes);
-  BufferAllocation::Slice out_slice(&out_alloc, 0, size_in_bytes);
+  auto [lhs_alloc, rhs_alloc, out_alloc] =
+      CreateBufferAllocation(lhs, rhs, out);
+  auto [lhs_slice, rhs_slice, out_slice] =
+      CreateBufferAllocationSlice(lhs_alloc, rhs_alloc, out_alloc);
 
   Shape shape = ShapeUtil::MakeShape(F32, {2, 2});
 
@@ -106,20 +110,24 @@ TEST(XnnFusionThunkTest, ElementwiseAdd) {
   XnnFusionThunk::Argument rhs_arg = {rhs_slice, shape};
   XnnFusionThunk::Result out_res = {out_slice, shape};
 
-  TF_ASSERT_OK_AND_ASSIGN(auto thunk,
-                          XnnFusionThunk::Create({"fusion"}, {lhs_arg, rhs_arg},
-                                                 {out_res}, &CreateBinaryAdd));
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto thunk, XnnFusionThunk::Create(
+                      XnnFusionThunk::Options{use_threadpool()}, {"fusion"},
+                      {lhs_arg, rhs_arg}, {out_res}, &CreateBinaryAdd));
 
   Thunk::ExecuteParams params;
   params.buffer_allocations = &allocations;
+  params.intra_op_threadpool = use_threadpool() ? &device : nullptr;
 
   auto execute_event = thunk->Execute(params);
   tsl::BlockUntilReady(execute_event);
   ASSERT_FALSE(execute_event.IsError()) << execute_event.GetError();
 
-  std::vector<float> expected = {5.0, 5.0, 5.0, 5.0};
-  EXPECT_EQ(out, expected);
+  EXPECT_EQ(out, LiteralUtil::CreateR1<float>({5.0, 5.0, 5.0, 5.0}));
 }
+
+INSTANTIATE_TEST_SUITE_P(XnnFusion, XnnFusionThunkTest,
+                         testing::Values(true, false));
 
 }  // namespace
 }  // namespace xla::cpu
