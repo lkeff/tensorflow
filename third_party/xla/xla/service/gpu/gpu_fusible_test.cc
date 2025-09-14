@@ -14,18 +14,18 @@ limitations under the License.
 ==============================================================================*/
 #include "xla/service/gpu/gpu_fusible.h"
 
+#include <cstdint>
 #include <memory>
 #include <vector>
 
+#include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/hlo/parser/hlo_parser.h"
-#include "xla/service/hlo_runner.h"
+#include "xla/hlo/testlib/hlo_hardware_independent_test_base.h"
 #include "xla/service/instruction_fusion.h"
-#include "xla/service/platform_util.h"
 #include "xla/stream_executor/device_description.h"
-#include "xla/tests/hlo_runner_agnostic_test_base.h"
 #include "xla/tsl/platform/statusor.h"
 #include "xla/tsl/platform/test.h"
 
@@ -36,19 +36,19 @@ namespace {
 using ::testing::ElementsAre;
 using ::testing::UnorderedElementsAre;
 
-auto MakeDeviceDescription() {
-  stream_executor::DeviceDescription device_description{
-      stream_executor::GpuDeviceInfoProto{}};
+absl::StatusOr<se::DeviceDescription> MakeDeviceDescription() {
+  TF_ASSIGN_OR_RETURN(stream_executor::DeviceDescription device_description,
+                      stream_executor::DeviceDescription::FromProto(
+                          stream_executor::GpuDeviceInfoProto{}));
   device_description.set_threads_per_warp(32);
   return device_description;
 }
 
-class GpuFusibleTest : public HloRunnerAgnosticTestBase {
+class GpuFusibleTest : public HloHardwareIndependentTestBase {
  public:
-  GpuFusibleTest()
-      : HloRunnerAgnosticTestBase(std::make_unique<HloRunner>(
-            PlatformUtil::GetDefaultPlatform().value())),
-        device_description_(MakeDeviceDescription()) {}
+  void SetUp() override {
+    TF_ASSERT_OK_AND_ASSIGN(device_description_, MakeDeviceDescription());
+  }
 
   bool IsReduceInputFusion(const HloInstruction& instr) const {
     return ::xla::gpu::IsReduceInputFusion(instr, device_description_);
@@ -86,7 +86,7 @@ class GpuFusibleTest : public HloRunnerAgnosticTestBase {
   }
 
  private:
-  const se::DeviceDescription device_description_;
+  se::DeviceDescription device_description_;
 };
 
 const char kModulePrefix[] = R"(
@@ -1279,6 +1279,17 @@ TEST_F(GpuFusibleTest, ProducerConsumerFusionInPlaceOperation) {
   EXPECT_FALSE(IsProducerMultiOutputFusible(*dus));
   EXPECT_TRUE(IsFusibleAsMultiOutputFusionRoot(*transpose));
   EXPECT_TRUE(ShapesCompatibleForMultiOutputFusion(*dus, *transpose));
+}
+
+TEST_F(GpuFusibleTest, BitwidthChangingBitcastIsNotFusible) {
+  auto module = ParseAndReturnVerifiedModule(R"(
+e {
+  a = s32[7,2]{1,0} parameter(0)
+  b = s16[7]{0} bitcast(a)
+})")
+                    .value();
+  EXPECT_FALSE(IsProducerMultiOutputFusible(
+      *module->entry_computation()->root_instruction()));
 }
 
 TEST_F(GpuFusibleTest, ChooseFusionKind) {

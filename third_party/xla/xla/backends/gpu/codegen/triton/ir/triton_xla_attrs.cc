@@ -13,9 +13,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <cstdint>
+
 #include "llvm/ADT/STLExtras.h"
+#include "mlir/Dialect/Utils/IndexingUtils.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/OpDefinition.h"  // IWYU pragma: keep
 #include "mlir/IR/Types.h"
 #include "mlir/Support/LLVM.h"
@@ -31,33 +35,99 @@ static mlir::ParseResult parseI64ArrayAttr(mlir::AsmParser& parser,
   return mlir::success();
 }
 
+ParseResult ParseOptionalSwizzleMode(mlir::AsmParser& parser,
+                                     SwizzleModeAttr& swizzle_mode) {
+  if (parser.parseOptionalComma()) {
+    // If there is no comma, we don't have a swizzle mode, but it's still valid.
+    swizzle_mode = nullptr;
+    return mlir::success();
+  }
+  StringAttr swizzle_mode_str;
+  if (parser.parseKeyword("swizzle_mode") || parser.parseEqual() ||
+      parser.parseAttribute(swizzle_mode_str)) {
+    return mlir::failure();
+  }
+  auto maybe_swizzle_mode = symbolizeSwizzleMode(swizzle_mode_str);
+  if (!maybe_swizzle_mode.has_value()) {
+    return mlir::failure();
+  }
+  swizzle_mode =
+      SwizzleModeAttr::get(parser.getContext(), maybe_swizzle_mode.value());
+  return mlir::success();
+}
+
 Attribute TmaDescriptorAttr::parse(mlir::AsmParser& parser, mlir::Type) {
-  int element_byte_size, swizzle_mode;
-  DenseI64ArrayAttr global_shape, block_shape;
+  int element_byte_size;
+  DenseI64ArrayAttr global_shape, tile_shape, tile_strides, layout;
+  SwizzleModeAttr swizzle_mode = nullptr;
 
   if (parser.parseLess() || parser.parseKeyword("global_shape") ||
       parser.parseEqual() || parseI64ArrayAttr(parser, global_shape) ||
-      parser.parseComma() || parser.parseKeyword("block_shape") ||
-      parser.parseEqual() || parseI64ArrayAttr(parser, block_shape) ||
+      parser.parseComma() || parser.parseKeyword("tile_shape") ||
+      parser.parseEqual() || parseI64ArrayAttr(parser, tile_shape) ||
+      parser.parseComma() || parser.parseKeyword("tile_strides") ||
+      parser.parseEqual() || parseI64ArrayAttr(parser, tile_strides) ||
+      parser.parseComma() || parser.parseKeyword("layout") ||
+      parser.parseEqual() || parseI64ArrayAttr(parser, layout) ||
       parser.parseComma() || parser.parseKeyword("element_byte_size") ||
       parser.parseEqual() || parser.parseInteger(element_byte_size) ||
-      parser.parseComma() || parser.parseKeyword("swizzle_mode") ||
-      parser.parseEqual() || parser.parseInteger(swizzle_mode) ||
-      parser.parseGreater()) {
+      ParseOptionalSwizzleMode(parser, swizzle_mode) || parser.parseGreater()) {
     return {};
   }
+
   return TmaDescriptorAttr::get(parser.getContext(), global_shape.asArrayRef(),
-                                block_shape.asArrayRef(), element_byte_size,
-                                swizzle_mode);
+                                tile_shape.asArrayRef(),
+                                tile_strides.asArrayRef(), layout.asArrayRef(),
+                                element_byte_size, swizzle_mode);
 }
 
 void TmaDescriptorAttr::print(mlir::AsmPrinter& printer) const {
   printer << "<global_shape = [";
   llvm::interleaveComma(getGlobalShape(), printer);
-  printer << "], block_shape = [";
-  llvm::interleaveComma(getBlockShape(), printer);
-  printer << "], element_byte_size = " << getElementByteSize()
-          << ", swizzle_mode = " << getSwizzleMode() << ">";
+  printer << "], tile_shape = [";
+  llvm::interleaveComma(getTileShape(), printer);
+  printer << "], tile_strides = [";
+  llvm::interleaveComma(getTileStrides(), printer);
+  printer << "], layout = [";
+  llvm::interleaveComma(getLayout(), printer);
+  printer << "], element_byte_size = " << getElementByteSize();
+  if (getSwizzleMode()) {
+    printer << ", swizzle_mode = \""
+            << stringifySwizzleMode(getSwizzleMode().getValue()) << "\"";
+  }
+  printer << ">";
+}
+
+AffineMap LayoutAttr::getAffineMap() const {
+  return AffineMap::getPermutationMap(getMinorToMajor(), getContext());
+}
+
+LogicalResult LayoutAttr::verifyLayout(
+    ArrayRef<int64_t> shape,
+    function_ref<InFlightDiagnostic()> emit_error) const {
+  if (getMinorToMajor().size() != shape.size()) {
+    emit_error() << "layout has " << getMinorToMajor().size()
+                 << " dimensions, but shape has " << shape.size();
+    return failure();
+  }
+  if (!isPermutationVector(getMinorToMajor().asArrayRef())) {
+    emit_error() << "layout is not a permutation";
+    return failure();
+  }
+  return success();
+}
+
+LogicalResult LayoutAttr::getStridesAndOffset(ArrayRef<int64_t> shape,
+                                              SmallVectorImpl<int64_t>& strides,
+                                              int64_t& offset) const {
+  strides.resize(shape.size());
+  int64_t size_product = 1;
+  for (auto dim : getMinorToMajor().asArrayRef()) {
+    strides[dim] = size_product;
+    size_product *= shape[dim];
+  }
+  offset = 0;
+  return success();
 }
 
 }  // namespace mlir::triton::xla

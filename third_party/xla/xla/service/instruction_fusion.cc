@@ -39,7 +39,9 @@ limitations under the License.
 #endif  // PLATFORM_GOOGLE
 #include "absl/types/span.h"
 #include "xla/debug_options_flags.h"
+#include "xla/hlo/analysis/alias_info.h"
 #include "xla/hlo/analysis/hlo_dataflow_analysis.h"
+#include "xla/hlo/analysis/hlo_operand_index.h"
 #include "xla/hlo/analysis/hlo_reachability.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_opcode.h"
@@ -171,6 +173,8 @@ bool IsAlwaysDuplicable(const HloInstruction& instruction) {
 
     // Expensive instructions or unusual instructions for which fusion is
     // nonsensical.
+    case HloOpcode::kAcos:
+    case HloOpcode::kAcosh:
     case HloOpcode::kAddDependency:
     case HloOpcode::kAfterAll:
     case HloOpcode::kAtan2:
@@ -221,6 +225,7 @@ bool IsAlwaysDuplicable(const HloInstruction& instruction) {
     case HloOpcode::kRngGetAndUpdateState:
     case HloOpcode::kRngBitGenerator:
     case HloOpcode::kRsqrt:
+    case HloOpcode::kScaledDot:
     case HloOpcode::kScatter:
     case HloOpcode::kSelectAndScatter:
     case HloOpcode::kSend:
@@ -523,7 +528,7 @@ class ReversePostOrderFusionQueue : public FusionQueue {
 bool MultiOutputFusionCreatesCycle(HloInstruction* producer,
                                    HloInstruction* consumer,
                                    const HloReachabilityMap& reachability) {
-  absl::flat_hash_set<int> operands;
+  absl::flat_hash_set<int64_t> operands;
   auto insert = [&](const HloInstruction* operand) {
     if (operand == producer) {
       return false;
@@ -558,7 +563,7 @@ bool MultiOutputFusionCreatesCycle(HloInstruction* producer,
   std::vector<HloInstruction*> worklist = producer->users();
   worklist.insert(worklist.end(), producer->control_successors().begin(),
                   producer->control_successors().end());
-  absl::flat_hash_set<int> visits;
+  absl::flat_hash_set<int64_t> visits;
   while (!worklist.empty()) {
     const HloInstruction* user = worklist.back();
     worklist.pop_back();
@@ -786,16 +791,23 @@ HloInstruction* InstructionFusion::AddFusionInstruction(
             consumer->shape(), kind, consumer,
             absl::StrCat(HloOpcodeString(producer->opcode()), "_",
                          HloOpcodeString(consumer->opcode()), "_")));
+    // A fussion instruction does not require an original value, which should
+    // have the same value as the root of the fused computation. However, we
+    // copy the value nontheless to simplify some use cases that involve
+    // fusions.
     TF_CHECK_OK(computation->ReplaceInstruction(consumer, fusion_instruction));
   }
   fusion_instruction->set_called_computations_execution_thread(
-      computation->execution_thread(),
-      /*skip_async_execution_thread_overwrite=*/false);
+      computation->execution_thread());
   return fusion_instruction;
 }
 
 HloInstruction* InstructionFusion::FuseInstruction(
     HloInstruction* fusion_instruction, HloInstruction* producer) {
+  if (producer->opcode() == HloOpcode::kFusion) {
+    fusion_instruction->MergeFusionInstruction(producer);
+    return fusion_instruction;
+  }
   return fusion_instruction->FuseInstruction(producer);
 }
 
@@ -1036,7 +1048,7 @@ bool IsSafeToFuseSliceIntoDusFusion(const HloInstruction* producer,
               "Slice op has a different shape than the update shape of the "
               "dus op, bailing.");
         }
-        for (int i = 0; i < dus->shape().dimensions_size(); ++i) {
+        for (int i = 0; i < dus->shape().dimensions().size(); ++i) {
           const HloInstruction* dus_operand =
               get_real_operand(consumer, dus->operand(2 + i));
           auto constant_operand = get_constant_operand(dus_operand);
@@ -1061,7 +1073,7 @@ bool IsSafeToFuseSliceIntoDusFusion(const HloInstruction* producer,
               "Dynamic slice op has a different shape than the update shape "
               "of the dus op, bailing.");
         }
-        for (int i = 0; i < dus->shape().dimensions_size(); ++i) {
+        for (int i = 0; i < dus->shape().dimensions().size(); ++i) {
           const HloInstruction* ds_operand = get_real_operand(
               producer, producer_nonelementwise->operand(1 + i));
           const HloInstruction* dus_operand =
@@ -1098,7 +1110,8 @@ FusionDecision InstructionFusion::ShouldFuse(
     HloInstruction* consumer, int64_t operand_index,
     std::function<FusionDecision(const HloInstruction*, const HloInstruction*,
                                  std::optional<const InPlaceFusionOptions>)>
-        inplace_op_fusion_decider) {
+        inplace_op_fusion_decider,
+    bool legality_check_only /*=false*/) {
   HloInstruction* producer = consumer->mutable_operand(operand_index);
 
   // Don't fuse across a root instruction.
@@ -1108,7 +1121,7 @@ FusionDecision InstructionFusion::ShouldFuse(
   }
 
   // Cost condition: don't duplicate expensive instructions.
-  if (FusionWouldDuplicate(*producer, *consumer) &&
+  if (!legality_check_only && FusionWouldDuplicate(*producer, *consumer) &&
       (!may_duplicate_ || is_expensive_(*producer)) &&
       !IsAlwaysDuplicable(*producer)) {
     return FusionDecision::Forbid(may_duplicate_

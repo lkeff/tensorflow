@@ -26,6 +26,7 @@ limitations under the License.
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "absl/time/time.h"
@@ -77,6 +78,7 @@ consider using --hlo_argument_mode=uninitialized.
 struct HloRunnerConfig {
   std::string input_format_str = "text";
   xla::InputFormat input_format;
+  std::string output_mode_str = "return_outputs";
   bool should_run = true;
   bool enable_mock_nccl = false;
   std::string dump_output_literal_to = "";
@@ -99,6 +101,7 @@ struct HloRunnerConfig {
   bool remove_infeed_outfeed = true;
   bool compile_as_stablehlo = false;
   bool use_layouts_from_hlo_module = false;
+  bool force_auto_layout = false;
   int32_t num_repeats = 1;
   std::string execution_options_path = "";
   int64_t gpu_client_initialization_timeout_sec = 300;
@@ -161,9 +164,14 @@ RunningOptionsFromFlags(const HloRunnerConfig& opts) {
   FunctionalHloRunner::RunningOptions out;
   TF_ASSIGN_OR_RETURN(out.module_argument_mode,
                       ArgumentModeFromString(opts.hlo_argument_mode));
+  std::string error;
+  if (!FunctionalHloRunner::AbslParseFlag(opts.output_mode_str,
+                                          &out.module_output_mode, &error)) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("Invalid --output_mode specified. ", error,
+                     " Got: ", opts.output_mode_str));
+  }
 
-  out.module_output_mode =
-      FunctionalHloRunner::ModuleOutputMode::kReturnOutputs;
   out.num_repeats = static_cast<size_t>(opts.num_repeats);
   out.log_input_output_mode =
       opts.log_output ? FunctionalHloRunner::LogOutputMode::kLogOutput
@@ -391,6 +399,8 @@ int main(int argc, char** argv) {
                 &opts.use_layouts_from_hlo_module,
                 "If set, use layouts from the HLO module's "
                 "entry_computation_layout."),
+      tsl::Flag("force_auto_layout", &opts.force_auto_layout,
+                "If set, force auto layout."),
       tsl::Flag("num_repeats", &opts.num_repeats,
                 "Repeatedly execute the HLO for this many times."),
       tsl::Flag("execution_options_path", &opts.execution_options_path,
@@ -415,7 +425,16 @@ int main(int argc, char** argv) {
                 "A file containing debug options to be passed to the HLO "
                 "module. The file should contain a serialized DebugOptions "
                 "proto message. The order of precedence: command line flags > "
-                "XLA_FLAGS > debug_options_file > default flags.")};
+                "XLA_FLAGS > debug_options_file > default flags."),
+      tsl::Flag(
+          "output_mode", &opts.output_mode_str,
+          "Specify whether outputs are returned after execution. "
+          "Possible values: return_outputs (default), not_return_outputs, "
+          "return_device_0_outputs (return outputs only from logical device "
+          "0). "
+          "If outputs are not returned, outputs are still computed but the "
+          "potentially slow device-to-host copy is skipped."),
+  };
 
   xla::AppendDebugOptionsFlags(&flag_list);
 

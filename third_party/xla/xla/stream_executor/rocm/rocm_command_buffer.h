@@ -32,10 +32,9 @@ limitations under the License.
 #include "xla/stream_executor/command_buffer.h"
 #include "xla/stream_executor/device_memory.h"
 #include "xla/stream_executor/gpu/gpu_command_buffer.h"
-#include "xla/stream_executor/gpu/scoped_gpu_graph_exec.h"
-#include "xla/stream_executor/gpu/scoped_update_mode.h"
 #include "xla/stream_executor/kernel.h"
 #include "xla/stream_executor/launch_dim.h"
+#include "xla/stream_executor/platform.h"
 #include "xla/stream_executor/stream_executor.h"
 
 namespace stream_executor::gpu {
@@ -45,14 +44,14 @@ class RocmCommandBuffer : public GpuCommandBuffer {
  public:
   // Creates a new ROCm command buffer and the underlying HIP graph.
   static absl::StatusOr<std::unique_ptr<RocmCommandBuffer>> Create(
-      Mode mode, StreamExecutor* parent);
+      Mode mode, StreamExecutor* executor);
 
   ~RocmCommandBuffer() override;
 
  private:
-  RocmCommandBuffer(Mode mode, StreamExecutor* parent, hipGraph_t graph,
+  RocmCommandBuffer(Mode mode, StreamExecutor* executor, hipGraph_t graph,
                     bool is_owned_graph)
-      : GpuCommandBuffer(mode, parent),
+      : GpuCommandBuffer(mode, executor),
         graph_(graph),
         is_owned_graph_(is_owned_graph) {}
 
@@ -118,15 +117,16 @@ class RocmCommandBuffer : public GpuCommandBuffer {
   }
 
   absl::StatusOr<GraphNodeHandle> CreateChildNode(
-      absl::Span<const GraphNodeHandle> dependencies,
-      const CommandBuffer& nested) override;
+      ChildCommandType type, absl::Span<const GraphNodeHandle> dependencies,
+      CommandBuffer& nested) override;
 
-  absl::Status UpdateChildNode(GraphNodeHandle node_handle,
+  absl::Status UpdateChildNode(ChildCommandType type,
+                               GraphNodeHandle node_handle,
                                const CommandBuffer& nested) override;
 
   absl::StatusOr<GraphNodeHandle> CreateKernelNode(
-      absl::Span<const GraphNodeHandle> dependencies, const ThreadDim& threads,
-      const BlockDim& blocks, const Kernel& kernel,
+      absl::Span<const GraphNodeHandle> dependencies, StreamPriority priority,
+      const ThreadDim& threads, const BlockDim& blocks, const Kernel& kernel,
       const KernelArgsPackedArrayBase& args) override;
 
   absl::Status UpdateKernelNode(GraphNodeHandle node_handle,
@@ -134,12 +134,19 @@ class RocmCommandBuffer : public GpuCommandBuffer {
                                 const BlockDim& blocks, const Kernel& kernel,
                                 const KernelArgsPackedArrayBase& args) override;
 
+  absl::StatusOr<GraphNodeHandle> CreateEmptyNode(
+      absl::Span<const GraphNodeHandle> dependencies) override;
+
   absl::Status Trace(Stream* stream,
                      absl::AnyInvocable<absl::Status()> function) override;
 
   absl::Status LaunchGraph(Stream* stream) override;
 
   absl::StatusOr<size_t> GetNodeCount() const override;
+
+  absl::Status SetPriority(StreamPriority priority) override {
+    return absl::UnimplementedError("Not implemented.");
+  }
 
   absl::Status PrepareFinalization() override;
 
@@ -149,21 +156,17 @@ class RocmCommandBuffer : public GpuCommandBuffer {
 
   absl::Status InstantiateGraph() override;
 
-  using ScopedRocmGraphExec = ScopedGraphExec<hipGraphExec_t>;
-  std::unique_ptr<ScopedUpdateMode> ActivateUpdateMode(
-      GpuCommandBuffer* nested_cmd_buffer) override;
-
   absl::Status CheckCanBeUpdated() override;
 
   static_assert(std::is_pointer_v<hipGraph_t>, "hipGraph_t must be a pointer");
   static_assert(std::is_pointer_v<hipGraphExec_t>,
                 "hipGraphExec_t must be a pointer");
 
-  hipGraph_t graph_ = nullptr;  // owned if `is_owned_graph_`
-  bool is_owned_graph_ = true;  // ownership of `graph_`
+  RocmCommandBuffer* parent_ = nullptr;
 
-  hipGraphExec_t exec_ = nullptr;    // owned if `is_owned_graph_exec_`
-  bool is_owned_graph_exec_ = true;  // ownership of `is_owned_graph_exec_`
+  hipGraph_t graph_ = nullptr;
+  bool is_owned_graph_ = true;
+  hipGraphExec_t exec_ = nullptr;
 };
 
 }  // namespace stream_executor::gpu

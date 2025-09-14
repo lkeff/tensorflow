@@ -83,7 +83,7 @@ class CudaExecutor : public GpuExecutor {
   bool CanEnablePeerAccessTo(StreamExecutor* other) override;
   bool DeviceMemoryUsage(int64_t* free_out, int64_t* total_out) const override;
   absl::StatusOr<std::unique_ptr<Kernel>> LoadKernel(
-      const MultiKernelLoaderSpec& spec) override;
+      const KernelLoaderSpec& spec) override;
   void UnloadKernel(const Kernel* kernel) override;
   absl::StatusOr<ModuleHandle> LoadModule(
       const MultiModuleLoaderSpec& spec) override;
@@ -100,8 +100,6 @@ class CudaExecutor : public GpuExecutor {
       std::optional<std::variant<StreamPriority, int>> priority) override;
   absl::StatusOr<std::unique_ptr<CommandBuffer>> CreateCommandBuffer(
       CommandBuffer::Mode mode) override;
-  int cc_major() const { return cc_major_; }
-  int cc_minor() const { return cc_minor_; }
 
   absl::StatusOr<std::unique_ptr<DeviceDescription>> CreateDeviceDescription()
       const override {
@@ -134,7 +132,7 @@ class CudaExecutor : public GpuExecutor {
   // Creates, allocates, and copies a CUtensorMap object for the given TMA
   // descriptor. Returns a TensorMap, which is 128 bytes of storage, to be
   // passed by value to the kernel.
-  absl::StatusOr<TensorMap> CreateTensorMap(TmaDescriptor tma_desc,
+  absl::StatusOr<TensorMap> CreateTensorMap(const TmaDescriptor& tma_desc,
                                             void* global_address) override;
   absl::StatusOr<std::unique_ptr<MemoryAllocator>> CreateMemoryAllocator(
       MemoryType type) override;
@@ -183,12 +181,6 @@ class CudaExecutor : public GpuExecutor {
 
   // True if delay kernels are supported.
   bool delay_kernels_supported_ = false;
-
-  // The major version of the compute capability for device_.
-  int cc_major_;
-
-  // The minor version of the compute capability for device_.
-  int cc_minor_;
 
   // The NUMA node of the CPU closest to device_
   int numa_node_;

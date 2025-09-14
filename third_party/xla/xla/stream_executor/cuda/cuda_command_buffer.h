@@ -34,10 +34,9 @@ limitations under the License.
 #include "xla/stream_executor/cuda/cuda_context.h"
 #include "xla/stream_executor/device_memory.h"
 #include "xla/stream_executor/gpu/gpu_command_buffer.h"
-#include "xla/stream_executor/gpu/scoped_gpu_graph_exec.h"
-#include "xla/stream_executor/gpu/scoped_update_mode.h"
 #include "xla/stream_executor/kernel.h"
 #include "xla/stream_executor/launch_dim.h"
+#include "xla/stream_executor/platform.h"
 #include "xla/stream_executor/stream.h"
 #include "xla/stream_executor/stream_executor.h"
 
@@ -52,16 +51,16 @@ class CudaCommandBuffer final : public GpuCommandBuffer {
  public:
   // Creates a new CUDA command buffer and the underlying CUDA graph.
   static absl::StatusOr<std::unique_ptr<CudaCommandBuffer>> Create(
-      Mode mode, StreamExecutor* parent, CudaContext* cuda_context);
+      Mode mode, StreamExecutor* executor, CudaContext* cuda_context);
 
   ~CudaCommandBuffer() override;
 
  private:
-  CudaCommandBuffer(Mode mode, StreamExecutor* parent,
+  CudaCommandBuffer(Mode mode, StreamExecutor* executor,
                     CudaContext* cuda_context, CUgraph graph,
                     bool is_owned_graph)
-      : GpuCommandBuffer(mode, parent),
-        parent_(parent),
+      : GpuCommandBuffer(mode, executor),
+        stream_exec_(executor),
         cuda_context_(cuda_context),
         graph_(graph),
         is_owned_graph_(is_owned_graph) {
@@ -132,15 +131,16 @@ class CudaCommandBuffer final : public GpuCommandBuffer {
                                   GraphNodeHandle) override;
 
   absl::StatusOr<GraphNodeHandle> CreateChildNode(
-      absl::Span<const GraphNodeHandle> dependencies,
-      const CommandBuffer& nested) override;
+      ChildCommandType type, absl::Span<const GraphNodeHandle> dependencies,
+      CommandBuffer& nested) override;
 
-  absl::Status UpdateChildNode(GraphNodeHandle node_handle,
+  absl::Status UpdateChildNode(ChildCommandType type,
+                               GraphNodeHandle node_handle,
                                const CommandBuffer& nested) override;
 
   absl::StatusOr<GraphNodeHandle> CreateKernelNode(
-      absl::Span<const GraphNodeHandle> dependencies, const ThreadDim& threads,
-      const BlockDim& blocks, const Kernel& kernel,
+      absl::Span<const GraphNodeHandle> dependencies, StreamPriority priority,
+      const ThreadDim& threads, const BlockDim& blocks, const Kernel& kernel,
       const KernelArgsPackedArrayBase& args) override;
 
   absl::Status UpdateKernelNode(GraphNodeHandle node_handle,
@@ -148,12 +148,19 @@ class CudaCommandBuffer final : public GpuCommandBuffer {
                                 const BlockDim& blocks, const Kernel& kernel,
                                 const KernelArgsPackedArrayBase& args) override;
 
+  absl::StatusOr<GraphNodeHandle> CreateEmptyNode(
+      absl::Span<const GraphNodeHandle> dependencies) override;
+
   absl::Status Trace(Stream* stream,
                      absl::AnyInvocable<absl::Status()> function) override;
 
   absl::Status LaunchGraph(Stream* stream) override;
 
   absl::StatusOr<size_t> GetNodeCount() const override;
+
+  // Set the nodes inside the command buffer to the target priority, cuda
+  // currently only support kernel node's priority.
+  absl::Status SetPriority(StreamPriority priority) override;
 
   absl::Status PrepareFinalization() override;
 
@@ -163,9 +170,9 @@ class CudaCommandBuffer final : public GpuCommandBuffer {
 
   absl::Status InstantiateGraph() override;
 
-  using ScopedCudaGraphExec = ScopedGraphExec<CUgraphExec>;
-  std::unique_ptr<ScopedUpdateMode> ActivateUpdateMode(
-      GpuCommandBuffer* nested_cmd_buffer) override;
+  CommandBuffer* parent() const { return parent_; }
+
+  CUgraphExec graph_exec() const;
 
   absl::Status CheckCanBeUpdated() override;
 
@@ -186,7 +193,8 @@ class CudaCommandBuffer final : public GpuCommandBuffer {
   SetCaseConditionKernel set_case_condition_kernel_;
   SetWhileConditionKernel set_while_condition_kernel_;
 
-  StreamExecutor* parent_;
+  StreamExecutor* stream_exec_ = nullptr;
+  CudaCommandBuffer* parent_ = nullptr;
 
   CudaContext* cuda_context_;
 
@@ -194,11 +202,9 @@ class CudaCommandBuffer final : public GpuCommandBuffer {
   static_assert(std::is_pointer_v<CUgraphExec>,
                 "CUgraphExec must be a pointer");
 
-  CUgraph graph_ = nullptr;     // owned if `is_owned_graph_`
-  bool is_owned_graph_ = true;  // ownership of `graph_`
-
-  CUgraphExec exec_ = nullptr;       // owned if `is_owned_graph_exec_`
-  bool is_owned_graph_exec_ = true;  // ownership of `is_owned_graph_exec_`
+  CUgraph graph_ = nullptr;
+  bool is_owned_graph_ = true;
+  CUgraphExec graph_exec_ = nullptr;
 };
 
 }  // namespace stream_executor::gpu

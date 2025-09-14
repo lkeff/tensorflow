@@ -16,7 +16,7 @@ limitations under the License.
 #ifndef XLA_SERVICE_GPU_TRANSFORMS_COLLECTIVES_COLLECTIVE_OPS_UTILS_H_
 #define XLA_SERVICE_GPU_TRANSFORMS_COLLECTIVES_COLLECTIVE_OPS_UTILS_H_
 
-#include <optional>
+#include <cstdint>
 
 #include "absl/status/statusor.h"
 #include "xla/hlo/ir/hlo_instruction.h"
@@ -34,22 +34,26 @@ enum class GPUCommunicationType {
   SINGLE_HOST = 3
 };
 
+// Returns the type of communication pattern for a channel instruction.
 absl::StatusOr<GPUCommunicationType> CommunicationType(
-    const HloCollectiveInstruction& instr,
+    int num_devices_per_host, const HloChannelInstruction& instr,
     const se::GpuComputeCapability& gpu_version);
 
 // Returns true if instruction is a synchronous collective op.
 bool IsGPUSyncCollective(const HloInstruction& instr);
 
-// Returns true if the topology is multi-host. Currently this function is
-// heuristic based: it can be the case it will not detect a multi host case when
-// a user decides to use < 8 GPUs per host. Moreover it tells nothing about how
-// fast the interconnect between hosts is (Infiniband, NVLINK, DCN, etc.).
-//
-// Will return `std::nullopt` on any platform other than Hopper and Ampere.
-std::optional<bool> IsMultiHostTopology(
+enum class GPUTopologyType {
+  UNKNOWN = 0,
+  SINGLE_HOST = 1,
+  MULTI_HOST = 2,
+};
+
+// Returns true if heuristic collective combining is enabled.
+// Heuristic collective combining enables more aggressive optimizations based
+// on the platform and HLO's topology.
+bool EnableHeuristicCollectiveCombining(
     const HloModuleConfig& config,
-    const se::DeviceDescription& device_description);
+    const se::DeviceDescription& device_description, int64_t nvlink_slice_size);
 
 }  // namespace gpu
 }  // namespace xla

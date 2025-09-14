@@ -1,6 +1,7 @@
 load("@local_config_cuda//cuda:build_defs.bzl", "cuda_library")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("//xla:xla.default.bzl", "xla_cc_binary")
-load("//xla/tests:build_defs.bzl", "DEFAULT_DISABLED_BACKENDS", "xla_test")
+load("//xla/tests:build_defs.bzl", "xla_test")
 load("//xla/tsl:tsl.bzl", "if_windows")
 load(
     "//xla/tsl/platform/default:cuda_build_defs.bzl",
@@ -113,8 +114,6 @@ xla_test(
     name = "cutlass_gemm_fusion_test",
     srcs = ["cutlass_gemm_fusion_test.cc"],
     backends = ["gpu"],
-    # TODO(b/332820384): Enable when it passes on H100.
-    disabled_backends = DEFAULT_DISABLED_BACKENDS + ["gpu_h100"],
     tags = ["cuda-only"],
     deps = [
         ":custom_kernel_fusion_pattern",
@@ -173,7 +172,6 @@ xla_test(
     name = "cutlass_gemm_custom_kernel_test",
     srcs = ["cutlass_gemm_custom_kernel_test.cc"],
     backends = ["gpu"],
-    data = [":cutlass_gemm_kernel_f32xf32_to_f32.so"],
     linkstatic = False,  # This test is incompatible with linkstatic in the OSS build.
     tags = ["cuda-only"],
     deps = [
@@ -359,25 +357,10 @@ cuda_library(
         "gpu",
     ],
     deps = [
+        ":cutlass_gemm",
         ":cutlass_gemm_adaptor",
         "@cutlass_archive//:cutlass",
     ],
-)
-
-#===--------------------------------------------------------------------------------------------===#
-# CUTLASS Gemm kernel libraries
-#===--------------------------------------------------------------------------------------------===#
-
-cc_binary(
-    name = "cutlass_gemm_kernel_f32xf32_to_f32.so",
-    srcs = ["cutlass_gemm_kernel_f32xf32_to_f32.cc"],
-    linkshared = True,
-    linkstatic = False,
-    tags = [
-        "cuda-only",
-        "gpu",
-    ],
-    deps = [":cutlass_gemm"],
 )
 
 #===--------------------------------------------------------------------------------------------===#

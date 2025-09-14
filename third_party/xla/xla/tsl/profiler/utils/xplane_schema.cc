@@ -30,6 +30,7 @@ namespace profiler {
 const absl::string_view kHostThreadsPlaneName = "/host:CPU";
 const absl::string_view kGpuPlanePrefix = "/device:GPU:";
 const absl::string_view kTpuPlanePrefix = "/device:TPU:";
+const absl::string_view kVirtualDevicePlanePrefix = "/virtualdevice:";
 const absl::string_view kTpuNonCorePlaneNamePrefix = "#Chip";
 const char kTpuPlaneRegex[] = {"/device:TPU:([0-9]*)$"};
 const char kSparseCorePlaneRegex[] = {
@@ -37,6 +38,8 @@ const char kSparseCorePlaneRegex[] = {
 // TODO(b/195582092): change it to /device:custom once all literals are
 // migrated.
 const absl::string_view kCustomPlanePrefix = "/device:CUSTOM:";
+const absl::string_view kCustomGpuOnDeviceTracePlanePrefix =
+    "/device:CUSTOM:MOSAIC:";  // /device:CUSTOM:MOSAIC:INSTANCE_ID
 
 const absl::string_view kScopeRangeIdTreePlaneName =
     "/host:__ScopeRangeCallStack__";
@@ -242,6 +245,9 @@ const StatTypeMap& GetStatTypeMap() {
        {"element_id", kElementId},
        {"parent_id", kParentId},
        {"core_type", kCoreType},
+       {"_ipl_stage_id", kInputPipelineStageId},
+       {"_ipl_stage_name", kInputPipelineStageName},
+       {"_ipl_stage_cat", kInputPipelineStageCategory},
        // XPlane semantics related.
        {"_pt", kProducerType},
        {"_ct", kConsumerType},
@@ -358,6 +364,7 @@ const StatTypeMap& GetStatTypeMap() {
        {"dcn_chunk", kDcnChunk},
        {"dcn_loop_index", kDcnLoopIndex},
        {"dropped_traces", kDroppedTraces},
+       {"nan_counter_events", kNanCounterEvents},
        {"cuda_graph_id", kCudaGraphId},
        {"cuda_graph_exec_id", kCudaGraphExecId},
        {"cuda_graph_orig_id", kCudaGraphOrigId},
@@ -367,7 +374,16 @@ const StatTypeMap& GetStatTypeMap() {
        {"device_offset_ps", kDeviceOffsetPs},
        {"device_duration_ps", kDeviceDurationPs},
        {"scope_range_id", kScopeRangeId},
-       {"core_details", kCoreDetails}});
+       {"core_details", kCoreDetails},
+       // IFRT Stats
+       {"mlir_program", kMlIRProgram},
+       {"cuda_graph_node_id", kCudaGraphNodeId},
+       {"cuda_orig_graph_id", kCudaOrigGraphId},
+       {"cuda_graph_orig_node_id", kCudaGraphOrigNodeId},
+       {"cuda_graph_map_id", kCudaGraphMapId},
+       {"cuda_graph_map_value_id", kCudaGraphMapValueId},
+       {"cuda_graph_node_map_id", kCudaGraphNodeMapId},
+       {"graph_metadata_line_id", kGraphMetadataLineId}});
   DCHECK_EQ(stat_type_map->size(), kNumStatTypes);
   return *stat_type_map;
 }

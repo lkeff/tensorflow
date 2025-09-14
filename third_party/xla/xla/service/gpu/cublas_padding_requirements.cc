@@ -18,10 +18,11 @@ limitations under the License.
 #include <cstdint>
 #include <variant>
 
+#include "absl/functional/overload.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_instructions.h"
-#include "xla/service/overload.h"
 #include "xla/shape.h"
+#include "xla/stream_executor/cuda/cuda_compute_capability.h"
 #include "xla/stream_executor/device_description.h"
 #include "xla/util.h"
 
@@ -33,10 +34,10 @@ namespace {
 bool DimensionRequiresPadding(const int64_t size, const PrimitiveType data_type,
                               const se::GpuComputeCapability& gpu_cc) {
   return std::visit(
-      Overload{
+      absl::Overload(
           [&](const se::CudaComputeCapability& cc) {
             for (const auto& req : CublasPaddingRequirements) {
-              if (cc.IsAtLeast(req.min_compute_capability) &&
+              if (cc.SupportsAllFeaturesOf(req.min_compute_capability) &&
                   data_type == req.data_type && size % req.multiple_of != 0) {
                 return true;
               }
@@ -50,7 +51,7 @@ bool DimensionRequiresPadding(const int64_t size, const PrimitiveType data_type,
               }
             }
             return false;
-          }},
+          }),
       gpu_cc);
 }
 

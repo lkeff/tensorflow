@@ -120,14 +120,21 @@ struct HloLegalizeToStablehloPass
 
     if (allow_xla_features_) {
       // These ops do not exist in StableHLO.
-      target.addLegalOp<
-          mhlo::AsyncDoneOp, mhlo::AsyncStartOp, mhlo::AsyncUpdateOp,
-          mhlo::BitcastOp, mhlo::CopyOp, mhlo::DomainOp, mhlo::ErfOp,
-          mhlo::FusionOp, mhlo::MinimumBroadcastShapesOp, mhlo::RaggedDotOp,
-          mhlo::SparseDotOp, mhlo::StochasticConvertOp, mhlo::TopKOp,
-          mhlo::TraceOp, mhlo::XlaRngGetAndUpdateStateOp>();
+      target.addLegalOp<mhlo::AsyncDoneOp, mhlo::AsyncStartOp,
+                        mhlo::AsyncUpdateOp, mhlo::BitcastOp, mhlo::CopyOp,
+                        mhlo::DomainOp, mhlo::ErfOp, mhlo::FusionOp,
+                        mhlo::MinimumBroadcastShapesOp, mhlo::RaggedDotOp,
+                        mhlo::StochasticConvertOp, mhlo::TopKOp, mhlo::TraceOp,
+                        mhlo::XlaRngGetAndUpdateStateOp>();
       target.addDynamicallyLegalOp<mhlo::AddDependencyOp>(
           [](mhlo::AddDependencyOp op) { return !hasMhloOperand(op); });
+      target.addDynamicallyLegalOp<mhlo::CustomCallOp>(
+          [](mhlo::CustomCallOp op) {
+            return !!op.getCustomCallScheduleAttr();
+          });
+      // TODO: StableHLO AllToAll has different semantics than MHLO AllToAll.
+      target.addDynamicallyLegalOp<mhlo::AllToAllOp>(
+          [](mhlo::AllToAllOp op) { return op.getNumOperands() > 1; });
       patterns.add<AddDependencyOpToStablehloTokenConverter>(&getContext());
     }
 

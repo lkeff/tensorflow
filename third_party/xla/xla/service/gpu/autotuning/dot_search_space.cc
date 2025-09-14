@@ -23,12 +23,16 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/strings/str_format.h"
 #include "llvm/ADT/STLExtras.h"
 #include "xla/hlo/ir/hlo_instructions.h"
+#include "xla/hlo/ir/hlo_module.h"
+#include "xla/hlo/ir/hlo_opcode.h"
+#include "xla/hlo/utils/hlo_traversal.h"
 #include "xla/primitive_util.h"
 #include "xla/service/gpu/matmul_utils.h"
 #include "xla/shape.h"
@@ -96,6 +100,8 @@ TritonDotFusionSearchSpace::TritonDotFusionSearchSpace(
           primitive_util::BitWidth(dot->operand(0)->shape().element_type())),
       compute_bitwidth_(primitive_util::BitWidth(dot->shape().element_type())),
       // Figure out some basic limitations on tiling based on the above.
+      lhs_has_expensive_op_(HasExpensiveTransitiveParent(dot->operand(0))),
+      rhs_has_expensive_op_(HasExpensiveTransitiveParent(dot->operand(1))),
       desired_total_warps_(GetDesiredTotalWarps()),
       max_out_tile_(GetMaxOutputTile()),
       should_optimize_for_occupancy_(ShouldOptimizeForOccupancy()),
@@ -109,10 +115,14 @@ TritonDotFusionSearchSpace::TritonDotFusionSearchSpace(
       std::max(min_out_tile_.lhs_dim, max_out_tile_.lhs_dim);
   max_out_tile_.rhs_dim =
       std::max(min_out_tile_.rhs_dim, max_out_tile_.rhs_dim);
+  exhaustive_tiling_search_ = dot->GetModule()
+                                  ->config()
+                                  .debug_options()
+                                  .xla_gpu_exhaustive_tiling_search();
 }
 
 std::vector<TritonGemmConfig> TritonDotFusionSearchSpace::GenerateConfigs(
-    std::optional<int64_t> force_contracting_split) const {
+    std::optional<int64_t> force_contracting_split, bool autotune_tma) const {
   std::vector<ConfigWithNotes> configs;
   if (force_contracting_split.has_value()) {
     ConfigWithNotes config;
@@ -140,6 +150,9 @@ std::vector<TritonGemmConfig> TritonDotFusionSearchSpace::GenerateConfigs(
   ExtendConfigs(configs, &TritonDotFusionSearchSpace::AddCtaSizeParameter);
   ExtendConfigs(configs, &TritonDotFusionSearchSpace::AddContractingTiling);
   ExtendConfigs(configs, &TritonDotFusionSearchSpace::AddPipeliningParameter);
+  if (autotune_tma) {
+    ExtendConfigs(configs, &TritonDotFusionSearchSpace::AddTmaParameter);
+  }
 
   std::vector<TritonGemmConfig> result;
   result.reserve(configs.size());
@@ -159,9 +172,28 @@ std::vector<TritonGemmConfig> TritonDotFusionSearchSpace::OptimizeConfigSet(
     return configs;
   }
 
-  auto split_limits = std::minmax_element(
-      configs.begin(), configs.end(),
-      [](const auto& a, const auto& b) { return a.split_k < b.split_k; });
+  absl::flat_hash_map<std::pair<int, int>, std::pair<int, int>>
+      m_n_to_split_limits;
+  std::pair<int, int> global_split_limits;
+  auto update_split_limits = [](auto& limits, int value) {
+    limits = std::minmax({limits.first, limits.second, value});
+  };
+  for (const TritonGemmConfig& config : configs) {
+    auto m_n_key = std::make_pair(config.block_m, config.block_n);
+    auto& split_limits =
+        m_n_to_split_limits.try_emplace(m_n_key, config.split_k, config.split_k)
+            .first->second;
+    update_split_limits(split_limits, config.split_k);
+    update_split_limits(global_split_limits, config.split_k);
+  }
+
+  auto get_split_limits = [&](int block_m, int block_n) {
+    auto m_n_key = std::make_pair(block_m, block_n);
+    auto split_limits_it = m_n_to_split_limits.find(m_n_key);
+    return split_limits_it == m_n_to_split_limits.end()
+               ? global_split_limits
+               : split_limits_it->second;
+  };
   absl::flat_hash_set<TritonGemmConfig> filter;
   for (TritonGemmConfig config : hints) {
     // Our default config set does not take problem size into account, so we
@@ -176,8 +208,9 @@ std::vector<TritonGemmConfig> TritonDotFusionSearchSpace::OptimizeConfigSet(
         std::clamp(config.block_k, min_contracting_tile_size_,
                    GetMaxContractingTileSize({config.block_m, config.block_n},
                                              /*contracting_split=*/1));
-    config.split_k = std::clamp(config.split_k, split_limits.first->split_k,
-                                split_limits.second->split_k);
+    const auto& split_limits = get_split_limits(config.block_m, config.block_n);
+    config.split_k =
+        std::clamp(config.split_k, split_limits.first, split_limits.second);
     VLOG(10) << "Adding config to hint filter: " << config.ToString();
     filter.insert(config);
   }
@@ -193,10 +226,10 @@ std::vector<TritonGemmConfig> TritonDotFusionSearchSpace::OptimizeConfigSet(
   };
 
   if (result_configs.empty()) {
-    LOG(WARNING) << "All configs were filtered out because none of them "
-                    "sufficiently match the hints. Maybe the hints set does "
-                    "not contain a good representative set of valid configs?"
-                    "Working around this by using the full hints set instead.";
+    LOG(INFO) << "All configs were filtered out because none of them "
+                 "sufficiently match the hints. Maybe the hints set does "
+                 "not contain a good representative set of valid configs? "
+                 "Working around this by using the full hints set instead.";
     return hints;
   }
   return result_configs;
@@ -213,6 +246,22 @@ std::string TritonDotFusionSearchSpace::ToString() const {
       min_out_tile_.lhs_dim, max_out_tile_.lhs_dim, min_out_tile_.rhs_dim,
       max_out_tile_.rhs_dim, min_contracting_tile_size_, desired_total_warps_,
       should_optimize_for_occupancy_, min_warps_per_cta_);
+}
+
+bool TritonDotFusionSearchSpace::HasExpensiveTransitiveParent(
+    const HloInstruction* operand) const {
+  return HloBfsAnyOf({operand}, [](const HloInstruction* instr) {
+    // XLA uses old absl that doesn't have absl:NoDestructor, so have to use
+    // new instead to prevent the destructor from being called.
+    static const auto kExpensiveOps = new absl::flat_hash_set<HloOpcode>{
+        HloOpcode::kAtan2,    HloOpcode::kCos,   HloOpcode::kExp,
+        HloOpcode::kExpm1,    HloOpcode::kLog,   HloOpcode::kLog1p,
+        HloOpcode::kLogistic, HloOpcode::kPower, HloOpcode::kRsqrt,
+        HloOpcode::kSin,      HloOpcode::kSqrt,  HloOpcode::kTan,
+        HloOpcode::kTanh,
+    };
+    return kExpensiveOps->contains(instr->opcode());
+  });
 }
 
 int TritonDotFusionSearchSpace::GetDesiredTotalWarps() const {
@@ -298,6 +347,12 @@ TritonDotFusionSearchSpace::GetMinOutputTile() const {
 }
 
 int TritonDotFusionSearchSpace::GetMinWarpsPerCta() const {
+  if (operand_bitwidth_ >= 32) {
+    // Triton is generating quite suboptimal code for 32-bit dots, especially
+    // when we use wgmma, or larger blocks.
+    // TODO: b/422419331 - Remove this once Triton properly handles 32-bit dots.
+    return kMinWarpsPerCtaForOccupancy;
+  }
   if (device_description_.cuda_compute_capability().IsAtLeastHopper() &&
       !should_optimize_for_occupancy_) {
     VLOG(5) << "Computing num_warps: Want to use wgmma, so num_warps >= "
@@ -470,8 +525,15 @@ void TritonDotFusionSearchSpace::AddOutputTilings(
       return !(a.second < b.first || b.second < a.first);
     };
     if (m < lhs_parallel_size_ && overlaps({m / 2, m * 2}, {min_n, max_n})) {
-      min_n = std::max(m / 2, min_n);
-      max_n = std::min(m * 2, max_n);
+      // If one of the sides has an expensive op fused in, then we should allow
+      // the tile of the other side to be larger, as that reduce the amount of
+      // recomputation of the expensive op.
+      if (!rhs_has_expensive_op_) {
+        min_n = std::max(m / 2, min_n);
+      }
+      if (!lhs_has_expensive_op_) {
+        max_n = std::min(m * 2, max_n);
+      }
       VLOG(5) << "Computing output tile: For m = " << m
               << ", restricting n-space to [" << min_n << "," << max_n
               << "] to have square-ish tiles.";
@@ -559,9 +621,38 @@ void TritonDotFusionSearchSpace::AddPipeliningParameter(
   }
 }
 
+void TritonDotFusionSearchSpace::AddTmaParameter(
+    const ConfigWithNotes& config,
+    std::vector<ConfigWithNotes>& updated_configs) const {
+  ConfigWithNotes new_config = config;
+  new_config.config.is_tma_allowed = false;
+  VLOG(10) << "Adding TMA (disabled) parameter: config = "
+           << new_config.ToString();
+  updated_configs.push_back(new_config);
+  new_config.config.is_tma_allowed = true;
+  VLOG(10) << "Adding TMA (enabled) parameter: config = "
+           << new_config.ToString();
+  updated_configs.push_back(new_config);
+}
+
 void TritonDotFusionSearchSpace::EliminateLowOccupancyConfigs(
     std::vector<ConfigWithNotes>& configs) const {
   CHECK(!configs.empty());
+
+  if (exhaustive_tiling_search_) {
+    VLOG(10) << "Exhaustive tiling search is enabled, skipping occupancy "
+                "optimization.";
+    return;
+  }
+
+  constexpr int kMinConfigsForOccupancyOptimization = 24;
+  if (configs.size() < kMinConfigsForOccupancyOptimization) {
+    VLOG(10) << "Skipping occupancy optimization for small search spaces. "
+                "Configs size: "
+             << configs.size() << " < " << kMinConfigsForOccupancyOptimization;
+    return;
+  }
+
   ConfigWithNotes last_config = configs.back();  // Largest split.
   auto has_too_few_tiles = [](const ConfigWithNotes& config) {
     if (config.not_enough_tiles) {
@@ -570,6 +661,7 @@ void TritonDotFusionSearchSpace::EliminateLowOccupancyConfigs(
     }
     return config.not_enough_tiles;
   };
+  int num_configs = configs.size();
   configs.erase(llvm::remove_if(configs, has_too_few_tiles), configs.end());
   if (configs.empty()) {
     // We can get no configs if the problem is small enough to not even occupy
@@ -581,6 +673,7 @@ void TritonDotFusionSearchSpace::EliminateLowOccupancyConfigs(
              << last_config.ToString();
     configs.push_back(last_config);
   }
+  VLOG(10) << "Eliminated " << num_configs - configs.size() << " configs.";
 }
 
 }  // namespace xla::gpu

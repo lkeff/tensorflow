@@ -33,6 +33,7 @@ limitations under the License.
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
 #include "absl/strings/str_split.h"
+#include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
 #include "xla/layout.h"
@@ -46,6 +47,7 @@ limitations under the License.
 #include "xla/tsl/concurrency/ref_count.h"
 #include "xla/tsl/platform/statusor.h"
 #include "xla/util.h"
+#include "xla/xla_data.pb.h"
 #include "tsl/platform/casts.h"
 #include "tsl/profiler/lib/connected_traceme.h"
 #include "tsl/profiler/lib/context_types.h"
@@ -73,7 +75,8 @@ class CommonAsyncHostToDeviceTransferManager
     std::optional<std::string> debug_info = std::nullopt;
     const auto& current_anno =
         tsl::profiler::ScopedMemoryDebugAnnotation::CurrentAnnotation();
-    if (current_anno.pending_op_name && current_anno.pending_region_type) {
+    if (!current_anno.pending_op_name.empty() &&
+        !current_anno.pending_region_type.empty()) {
       debug_info = std::make_optional<std::string>(absl::StrCat(
           current_anno.pending_op_name, " ", current_anno.pending_region_type));
     }
@@ -104,24 +107,6 @@ class CommonAsyncHostToDeviceTransferManager
             "Async buffer transfer of tuples not implemented.");
       }
 
-      // We make an event that will become available when the final transfer
-      // is complete.
-      tsl::RCReference<PjRtDeviceEventPromise> definition_event_promise;
-      tsl::RCReference<PjRtDeviceEvent> definition_event;
-      if (client->event_tracking_enabled()) {
-        TF_ASSIGN_OR_RETURN(
-            std::tie(definition_event_promise, definition_event),
-            client->CreateLinkedEventPromise(
-                memory_space,
-                absl::StrCat("AsyncHostToDeviceTransferManager Op:",
-                             debug_info.value_or(""))));
-      } else {
-        TF_ASSIGN_OR_RETURN(
-            std::tie(definition_event_promise, definition_event),
-            client->CreateLinkedEventPromise(memory_space, ""));
-      }
-      definition_events.push_back(std::move(definition_event_promise));
-
       auto allocation_event =
           client->CreateAllocationEventForTransfers(memory_space, debug_info);
       if (allocation_event) {
@@ -146,10 +131,30 @@ class CommonAsyncHostToDeviceTransferManager
       TF_ASSIGN_OR_RETURN(
           auto raw_buffer,
           client->AllocateRawBuffer(memory_space, on_device_bytes_count,
-                                    allocation_event));
+                                    /*retry_on_oom=*/true, allocation_event));
+
+      // We make an event that will become available when the final transfer
+      // is complete.
+      tsl::RCReference<PjRtDeviceEventPromise> definition_event_promise;
+      tsl::RCReference<PjRtDeviceEvent> definition_event;
+      if (client->event_tracking_enabled()) {
+        TF_ASSIGN_OR_RETURN(
+            std::tie(definition_event_promise, definition_event),
+            client->CreateLinkedEventPromise(
+                memory_space,
+                absl::StrCat("AsyncHostToDeviceTransferManager Op:",
+                             debug_info.value_or(""))));
+      } else {
+        TF_ASSIGN_OR_RETURN(
+            std::tie(definition_event_promise, definition_event),
+            client->CreateLinkedEventPromise(memory_space, ""));
+      }
+      definition_events.push_back(std::move(definition_event_promise));
+
       TF_ASSIGN_OR_RETURN(auto buffer,
                           client->DefineBuffer(device_shape, raw_buffer,
-                                               {std::move(definition_event)}));
+                                               {std::move(definition_event)},
+                                               /*raw_buffer_is_mutable=*/true));
       device_shapes.push_back(std::move(device_shape));
       buffers.push_back(std::move(buffer));
       undispatched_buffer_refs.push_back(raw_buffer);
@@ -243,60 +248,48 @@ class CommonAsyncHostToDeviceTransferManager
     tsl::profiler::TraceMeProducer producer("TransferLiteralToBuffer",
                                             tsl::profiler::ContextType::kPjRt);
 
-    // The host to device transfer is performed on a thread pool, mostly because
-    // it includes linearization that may be slow.
-    // TODO(misard) assess if it would be preferable to introduce a heuristic to
-    // put the transfer into the calling thread for small literals.
-    async_work_runner_->Schedule(
-        [this, buffer_index, literal, raw_buffer = std::move(raw_buffer),
-         definition_event = std::move(definition_event),
-         on_done = std::move(on_done),
-         context_id = producer.GetContextId()]() mutable {
-          tsl::profiler::TraceMeConsumer consumer(
-              "TransferLiteralToBuffer H2D Dispatch",
-              tsl::profiler::ContextType::kPjRt, context_id);
-          auto status_or_h2d_transfer_event = client_->LinearizeInto(
-              literal, device_shapes_[buffer_index].layout(), raw_buffer);
-          CHECK_OK(status_or_h2d_transfer_event);
-          auto h2d_transfer_event = *std::move(status_or_h2d_transfer_event);
-          if (client_->event_tracking_enabled()) {
-            h2d_transfer_event->AppendDescriptionToEvent(
-                " TransferToDevice TransferLiteralToBuffer",
-                {definition_event.get()});
-          }
+    TF_ASSIGN_OR_RETURN(
+        auto h2d_transfer_event,
+        client_->LinearizeInto(
+            literal, device_shapes_[buffer_index].layout(),
+            PjRtClient::HostBufferSemantics::kImmutableUntilTransferCompletes,
+            raw_buffer));
+    if (client_->event_tracking_enabled()) {
+      h2d_transfer_event->AppendDescriptionToEvent(
+          " TransferToDevice TransferLiteralToBuffer",
+          {definition_event.get()});
+    }
 
-          auto cleanup = [this, buffer_index,
-                          transfer_event = h2d_transfer_event,
-                          definition_event = std::move(definition_event),
-                          on_done = std::move(on_done)]() mutable {
-            {
-              absl::MutexLock l(&mu_);
+    auto cleanup = [this, buffer_index, transfer_event = h2d_transfer_event,
+                    definition_event = std::move(definition_event),
+                    on_done = std::move(on_done)]() mutable {
+      {
+        absl::MutexLock l(&mu_);
 
-              CHECK_GT(transfers_in_flight_, 0);
-              --transfers_in_flight_;
-              CHECK_EQ(buffer_transfers_in_flight_[buffer_index], 1);
-              --buffer_transfers_in_flight_[buffer_index];
-              CHECK_GT(remaining_buffer_count_, 0);
-              --remaining_buffer_count_;
-            }
+        CHECK_GT(transfers_in_flight_, 0);
+        --transfers_in_flight_;
+        CHECK_EQ(buffer_transfers_in_flight_[buffer_index], 1);
+        --buffer_transfers_in_flight_[buffer_index];
+        CHECK_GT(remaining_buffer_count_, 0);
+        --remaining_buffer_count_;
+      }
 
-            // Call on_done after finishing all housekeeping and releasing the
-            // lock.
-            //
-            // NOTE: on_done may call ~AsyncHostToDeviceTransferManager(), so we
-            // don't touch any class members after this point.
-            std::move(on_done)();
+      // Call on_done after finishing all housekeeping and releasing the
+      // lock.
+      //
+      // NOTE: on_done may call ~AsyncHostToDeviceTransferManager(), so we
+      // don't touch any class members after this point.
+      std::move(on_done)();
 
-            // Unblock the definition event after calling on_done, just in case
-            // the caller wanted some serialization between finding out about
-            // the buffers becoming available and them being released.
-            CHECK(definition_event);
-            // Dependency of event on transfer_event was recorded above in
-            // AppendDescriptionToEvent.
-            definition_event->Set(std::move(transfer_event));
-          };
-          h2d_transfer_event->AndThen(std::move(cleanup));
-        });
+      // Unblock the definition event after calling on_done, just in case
+      // the caller wanted some serialization between finding out about
+      // the buffers becoming available and them being released.
+      CHECK(definition_event);
+      // Dependency of event on transfer_event was recorded above in
+      // AppendDescriptionToEvent.
+      definition_event->Set(std::move(transfer_event));
+    };
+    h2d_transfer_event->AndThen(std::move(cleanup));
 
     return absl::OkStatus();
   }
@@ -338,8 +331,8 @@ class CommonAsyncHostToDeviceTransferManager
       op_name = debug_info.empty() ? "" : debug_info.front();
       region_type = debug_info.size() > 1 ? debug_info.back() : "";
     }
-    tsl::profiler::ScopedMemoryDebugAnnotation anno(
-        op_name.c_str(), region_type.c_str(), 0, []() { return ""; });
+    tsl::profiler::ScopedMemoryDebugAnnotation anno(op_name, region_type, 0,
+                                                    []() { return ""; });
     // Unblock allocating the underlying memory.
     allocation_events_[buffer_index].reset();
 

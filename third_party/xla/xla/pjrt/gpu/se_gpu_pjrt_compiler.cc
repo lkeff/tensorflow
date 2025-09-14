@@ -22,6 +22,8 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "xla/hlo/builder/xla_computation.h"
@@ -136,8 +138,10 @@ StreamExecutorGpuCompiler::Compile(CompileOptions options,
         tensorflow::down_cast<const xla::StreamExecutorGpuTopologyDescription&>(
             topology);
     if (gpu_topology.target_config().has_value()) {
-      options.target_config.emplace(
-          Compiler::TargetConfig(*gpu_topology.target_config()));
+      TF_ASSIGN_OR_RETURN(
+          Compiler::TargetConfig target_config,
+          Compiler::TargetConfig::FromProto(*gpu_topology.target_config()));
+      options.target_config.emplace(std::move(target_config));
     } else {
       return absl::UnimplementedError(
           "Compilation without client and without target_config specified is "
@@ -193,13 +197,22 @@ StreamExecutorGpuCompiler::Compile(CompileOptions options,
                                    mlir::ModuleOp module,
                                    const PjRtTopologyDescription& topology,
                                    PjRtClient* client) {
+  if (!options.target_config && client != nullptr) {
+    TF_RET_CHECK(IsGpuClient(*client))
+        << "GPU compilation requires a GPU PjRt client.";
+    TF_RETURN_IF_ERROR(IsValidTopologyAndClientForCompile(topology, client));
+    TF_ASSIGN_OR_RETURN(std::unique_ptr<PjRtExecutable> executable,
+                        client->Compile(module, options));
+    return executable;
+  }
+
   CompileOptions input_options = options;
   XlaComputation xla_computation;
   TF_RETURN_IF_ERROR(MlirToXlaComputation(
       module, xla_computation,
       /*use_tuple_args=*/options.parameter_is_tupled_arguments,
       /*return_tuple=*/false,
-      /*use_shardy=*/false));
+      /*exec_build_options=*/&input_options.executable_build_options));
   return Compile(std::move(input_options), xla_computation, topology, client);
 }
 }  // namespace xla

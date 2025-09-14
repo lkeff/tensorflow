@@ -80,9 +80,9 @@ class CollectiveInterpolationTest : public TestWithParam<ParametrizedTestCase> {
           space_spec.network_througput_bytes);
       *profiles.add_entries() = entry;
     }
-    device_info_ = TestGpuDeviceInfo::RTXA6000DeviceInfo(
-        stream_executor::CudaComputeCapability::Hopper());
-    interpolator_ = *CollectiveInterpolator::Create(profiles, device_info_);
+    device_info_ = TestGpuDeviceInfo::RTXA6000DeviceInfo();
+    interpolator_ = *CollectiveInterpolator::Create(kNumGpusPerHost, profiles,
+                                                    device_info_);
   }
 
  protected:
@@ -100,6 +100,7 @@ class CollectiveInterpolationTest : public TestWithParam<ParametrizedTestCase> {
     switch (opcode) {
       case HloOpcode::kAllReduce:
       case HloOpcode::kAllReduceStart:
+      case HloOpcode::kAllToAll:
         device_list = CollectiveDeviceList(CommToDeviceList(comm, num_hosts));
         shape = ShapeUtil::MakeShape(PrimitiveType::F32, {tensor_size / 4});
         break;
@@ -129,10 +130,10 @@ class CollectiveInterpolationTest : public TestWithParam<ParametrizedTestCase> {
     return profile;
   }
 
-  std::optional<absl::Duration> EstimateRuntime(HloOpcode opcode,
-                                                GPUCommunicationType comm,
-                                                int64_t tensor_size,
-                                                int num_hosts) {
+  absl::StatusOr<absl::Duration> EstimateRuntime(HloOpcode opcode,
+                                                 GPUCommunicationType comm,
+                                                 int64_t tensor_size,
+                                                 int num_hosts) {
     auto instr = CollectiveInstruction(opcode, comm, tensor_size, num_hosts);
     auto module = CollectiveInterpolator::ConstructModule(instr);
     auto* eval = Cast<HloCollectiveInstruction>(
@@ -418,19 +419,52 @@ class CollectiveInterpolationTest : public TestWithParam<ParametrizedTestCase> {
           /*num_nodes=*/4,
           /*network_througput_bytes=*/2 * 2048,
       },
+      {
+          /*opcode=*/HloOpcode::kAllToAll,
+          /*comm=*/GPUCommunicationType::SINGLE_HOST,
+          /*tensor_size=*/1024,
+          /*num_nodes=*/1,
+          /*network_througput_bytes=*/1024,
+      },
+      {
+          /*opcode=*/HloOpcode::kAllToAll,
+          /*comm=*/GPUCommunicationType::RAIL_ALIGNED,
+          /*tensor_size=*/1024,
+          /*num_nodes=*/2,
+          /*network_througput_bytes=*/2048,
+      },
+      {
+          /*opcode=*/HloOpcode::kAllToAll,
+          /*comm=*/GPUCommunicationType::NON_RAIL_ALIGNED,
+          /*tensor_size=*/1024,
+          /*num_nodes=*/2,
+          /*network_througput_bytes=*/4096,
+      },
   };
 };
 
 TEST_P(CollectiveInterpolationTest, NextNeighbourInterpolation) {
   const auto& [_, spec, expected_duration] = GetParam();
-  EXPECT_EQ(
-      EstimateRuntime(spec.opcode, spec.comm, spec.tensor_size, spec.num_nodes),
-      expected_duration);
+  EXPECT_EQ(*EstimateRuntime(spec.opcode, spec.comm, spec.tensor_size,
+                             spec.num_nodes),
+            expected_duration);
 }
 
 INSTANTIATE_TEST_SUITE_P(
     CollectiveInterpolationTestInstantiation, CollectiveInterpolationTest,
     ValuesIn<ParametrizedTestCase>({
+        {
+            /*test_name=*/"AR_rail_aligned_exact_nodes",
+            /*spec=*/
+            {
+                /*opcode=*/HloOpcode::kAllReduce,
+                /*comm=*/
+                GPUCommunicationType::RAIL_ALIGNED,
+                /*tensor_size=*/1024,
+                /*num_nodes=*/2,
+            },
+            /*expected_duration=*/absl::Seconds(1),
+        },
         {
             /*test_name=*/"AR_rail_aligned_extrapolate_nodes",
             /*spec=*/
@@ -478,6 +512,18 @@ INSTANTIATE_TEST_SUITE_P(
                 /*num_nodes=*/2,
             },
             /*expected_duration=*/absl::Milliseconds(1250),
+        },
+        {
+            /*test_name=*/"AR_nonrail_aligned_exact_nodes",
+            /*spec=*/
+            {
+                /*opcode=*/HloOpcode::kAllReduce,
+                /*comm=*/
+                GPUCommunicationType::NON_RAIL_ALIGNED,
+                /*tensor_size=*/1024,
+                /*num_nodes=*/2,
+            },
+            /*expected_duration=*/absl::Seconds(2),
         },
         {
             /*test_name=*/"AR_nonrail_aligned_extrapolate_nodes",
@@ -588,6 +634,18 @@ INSTANTIATE_TEST_SUITE_P(
             /*expected_duration=*/absl::Milliseconds(625),
         },
         {
+            /*test_name=*/"RS_rail_aligned_exact_nodes",
+            /*spec=*/
+            {
+                /*opcode=*/HloOpcode::kReduceScatter,
+                /*comm=*/
+                GPUCommunicationType::RAIL_ALIGNED,
+                /*tensor_size=*/1024,
+                /*num_nodes=*/2,
+            },
+            /*expected_duration=*/absl::Seconds(1),
+        },
+        {
             /*test_name=*/"RS_rail_aligned_extrapolate_nodes",
             /*spec=*/
             {
@@ -634,6 +692,18 @@ INSTANTIATE_TEST_SUITE_P(
                 /*num_nodes=*/2,
             },
             /*expected_duration=*/absl::Milliseconds(1250),
+        },
+        {
+            /*test_name=*/"RS_nonrail_aligned_exact_nodes",
+            /*spec=*/
+            {
+                /*opcode=*/HloOpcode::kReduceScatter,
+                /*comm=*/
+                GPUCommunicationType::NON_RAIL_ALIGNED,
+                /*tensor_size=*/1024,
+                /*num_nodes=*/2,
+            },
+            /*expected_duration=*/absl::Seconds(2),
         },
         {
             /*test_name=*/"RS_nonrail_aligned_extrapolate_nodes",
@@ -732,6 +802,18 @@ INSTANTIATE_TEST_SUITE_P(
             /*expected_duration=*/absl::Milliseconds(625),
         },
         {
+            /*test_name=*/"AG_rail_aligned_exact_nodes",
+            /*spec=*/
+            {
+                /*opcode=*/HloOpcode::kAllGather,
+                /*comm=*/
+                GPUCommunicationType::RAIL_ALIGNED,
+                /*tensor_size=*/1024,
+                /*num_nodes=*/2,
+            },
+            /*expected_duration=*/absl::Seconds(1),
+        },
+        {
             /*test_name=*/"AG_rail_aligned_extrapolate_nodes",
             /*spec=*/
             {
@@ -778,6 +860,18 @@ INSTANTIATE_TEST_SUITE_P(
                 /*num_nodes=*/2,
             },
             /*expected_duration=*/absl::Milliseconds(1250),
+        },
+        {
+            /*test_name=*/"AG_nonrail_aligned_exact_nodes",
+            /*spec=*/
+            {
+                /*opcode=*/HloOpcode::kAllGather,
+                /*comm=*/
+                GPUCommunicationType::NON_RAIL_ALIGNED,
+                /*tensor_size=*/1024,
+                /*num_nodes=*/2,
+            },
+            /*expected_duration=*/absl::Seconds(2),
         },
         {
             /*test_name=*/"AG_nonrail_aligned_extrapolate_nodes",
@@ -887,40 +981,103 @@ INSTANTIATE_TEST_SUITE_P(
             },
             /*expected_duration=*/absl::Milliseconds(625),
         },
+        {
+            /*test_name=*/"A2A_rail_aligned_exact_match",
+            {
+                /*opcode=*/HloOpcode::kAllToAll,
+                /*comm=*/
+                GPUCommunicationType::RAIL_ALIGNED,
+                /*tensor_size=*/1024,
+                /*num_nodes=*/2,
+            },
+            /*expected_duration=*/absl::Milliseconds(500),
+        },
+        {
+            /*test_name=*/"A2A_nonrail_aligned_exact_match",
+            {
+                /*opcode=*/HloOpcode::kAllToAll,
+                /*comm=*/
+                GPUCommunicationType::NON_RAIL_ALIGNED,
+                /*tensor_size=*/1024,
+                /*num_nodes=*/2,
+            },
+            /*expected_duration=*/absl::Milliseconds(250),
+        },
+        {
+            /*test_name=*/"A2A_single_host_exact_match",
+            {
+                /*opcode=*/HloOpcode::kAllToAll,
+                /*comm=*/
+                GPUCommunicationType::SINGLE_HOST,
+                /*tensor_size=*/1024,
+                /*num_nodes=*/1,
+            },
+            /*expected_duration=*/absl::Seconds(1),
+        },
     }),
     [](const TestParamInfo<CollectiveInterpolationTest::ParamType>& info) {
       return info.param.test_name;
     });
 
-TEST(CollectiveInterpolatorTest, LoadsDefaultProfile) {
-  auto device_info = TestGpuDeviceInfo::RTXA6000DeviceInfo(
-      stream_executor::CudaComputeCapability::Hopper());
-  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<CollectiveInterpolator> interpolator,
-                          CollectiveInterpolator::Create(device_info));
+struct CollectiveInterpolationWithDefaultProfileTestCase {
+  std::string test_name;
+  stream_executor::GpuComputeCapability cc;
+  absl::Duration expected_duration;
+};
+
+class CollectiveInterpolationWithDefaultProfileTest
+    : public TestWithParam<CollectiveInterpolationWithDefaultProfileTestCase> {
+};
+
+TEST_P(CollectiveInterpolationWithDefaultProfileTest, LoadsDefaultProfile) {
+  const auto& [test_name, cc, expected_duration] = GetParam();
+  auto device_info = TestGpuDeviceInfo::RTXA6000DeviceInfo(cc);
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<CollectiveInterpolator> interpolator,
+      CollectiveInterpolator::Create(kNumGpusPerHost, device_info));
   absl::string_view kHlo = R"(
     HloModule m, num_partitions=8
 
     wrapped_add {
-        a = f32[] parameter(0)
-        b = f32[] parameter(1)
-        ROOT _ = f32[] add(a,b)
+      a = f32[] parameter(0)
+      b = f32[] parameter(1)
+      ROOT _ = f32[] add(a,b)
     }
 
     ENTRY main {
-        p = f32[256] parameter(0)
-        ROOT _ = f32[256] all-reduce(p),
-        to_apply=wrapped_add,
-        replica_groups=[1,8]<=[8],
-        use_global_device_ids=true,
-        channel_id=1
+      p = f32[256] parameter(0)
+      ROOT _ = f32[256] all-reduce(p), to_apply=wrapped_add,
+          replica_groups=[1,8]<=[8], use_global_device_ids=true, channel_id=1
     }
 )";
   TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnUnverifiedModule(kHlo));
   HloCollectiveInstruction* instr = Cast<HloCollectiveInstruction>(
       module->entry_computation()->root_instruction());
 
-  EXPECT_TRUE(interpolator->EstimatedRuntime(*instr).has_value());
+  absl::StatusOr<absl::Duration> runtime =
+      interpolator->EstimatedRuntime(*instr);
+  EXPECT_TRUE(runtime.ok());
+  EXPECT_EQ(runtime.value(), expected_duration);
 }
+
+INSTANTIATE_TEST_SUITE_P(
+    CollectiveInterpolationWithDefaultProfileTestInstantiation,
+    CollectiveInterpolationWithDefaultProfileTest,
+    ValuesIn<CollectiveInterpolationWithDefaultProfileTestCase>(
+        {{
+             "H100",
+             se::CudaComputeCapability(9, 0),
+             absl::Microseconds(49.312),
+         },
+         {
+             "B200",
+             se::CudaComputeCapability(10, 0),
+             absl::Microseconds(45.024),
+         }}),
+    [](const TestParamInfo<
+        CollectiveInterpolationWithDefaultProfileTest::ParamType>& info) {
+      return info.param.test_name;
+    });
 
 }  // namespace
 }  // namespace xla::gpu

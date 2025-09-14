@@ -278,7 +278,7 @@ absl::Status SpmdPartitioningVisitor::HandleCustomCallSPMDInternal_RotateRight(
 
   amount %= full_size;
   if (amount == 0) {
-    SetPartitionedHlo(hlo, input);
+    SetPartitionedHlo(hlo, std::move(input));
     return absl::OkStatus();
   }
 
@@ -304,7 +304,7 @@ absl::Status SpmdPartitioningVisitor::HandleCustomCallSPMDInternal_RotateRight(
       HloInstruction* halo = input.hlo();
       if (halo_size != shard_size) {
         halo_shape.set_dimensions(dim, halo_size);
-        std::vector<int64_t> slice_starts(hlo->shape().dimensions_size(), 0);
+        std::vector<int64_t> slice_starts(hlo->shape().dimensions().size(), 0);
         slice_starts[dim] = offset_in_shard;
         std::vector<int64_t> slice_limits(
             input.hlo()->shape().dimensions().begin(),
@@ -312,7 +312,7 @@ absl::Status SpmdPartitioningVisitor::HandleCustomCallSPMDInternal_RotateRight(
         slice_limits[dim] = offset_in_shard + halo_size;
         halo = b_.AddInstruction(HloInstruction::CreateSlice(
             halo_shape, halo, slice_starts, slice_limits,
-            std::vector<int64_t>(halo_shape.dimensions_size(), 1)));
+            std::vector<int64_t>(halo_shape.dimensions().size(), 1)));
       }
       if (shard_distance != 0) {
         std::vector<std::pair<int64_t, int64_t>> pairs;
@@ -479,6 +479,39 @@ absl::Status SpmdPartitioningVisitor::HandleCustomCall(HloInstruction* hlo) {
                                           MakePartitioningState())
                                .Reshard(hlo->sharding()));
     return absl::OkStatus();
+  }
+
+  // Block-scaled dot with MX operands.
+  if (hlo->custom_call_target() == "__op$block_scaled_dot") {
+    // Evaluate the dimension numbers of the block-scaled dot.
+    int dimensions_size = hlo->operand(0)->shape().dimensions_size();
+    TF_RET_CHECK(dimensions_size == 2 || dimensions_size == 3);
+    DotDimensionNumbers dimension_numbers;
+    dimension_numbers.add_lhs_contracting_dimensions(dimensions_size - 1);
+    dimension_numbers.add_rhs_contracting_dimensions(dimensions_size - 1);
+    if (dimensions_size == 3) {
+      dimension_numbers.add_lhs_batch_dimensions(0);
+      dimension_numbers.add_rhs_batch_dimensions(0);
+    }
+
+    HloCustomCallInstruction* block_scaled_dot =
+        Cast<HloCustomCallInstruction>(hlo);
+    CreateShardedScaledDotFunctor create_sharded_scaled_dot_functor(
+        block_scaled_dot, dimension_numbers);
+
+    // Create a regular dot with equivalent operand and output shape to compute
+    // the mapping for HandleDotHelper.
+    PrecisionConfig precision_config;
+    precision_config.mutable_operand_precision()->Resize(
+        2, PrecisionConfig::DEFAULT);
+    std::unique_ptr<HloInstruction> dot = HloInstruction::CreateDot(
+        hlo->shape(), hlo->mutable_operand(0), hlo->mutable_operand(1),
+        dimension_numbers, precision_config);
+    dot_as_convolution_util::DotConvolutionDimsInfo mapping =
+        dot_as_convolution_util::ParseDotGeneralFromDot(dot.get());
+
+    return HandleDotHelper<CreateShardedScaledDotFunctor>(
+        hlo, mapping, create_sharded_scaled_dot_functor);
   }
 
   return DefaultAction(hlo);

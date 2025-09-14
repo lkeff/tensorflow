@@ -15,14 +15,12 @@ limitations under the License.
 
 #include "xla/service/gpu/autotuning/autotuner_compile_util.h"
 
-#include <cstdint>
-#include <iterator>
-#include <limits>
 #include <memory>
 #include <utility>
 #include <vector>
 
 #include "absl/log/check.h"
+#include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/string_view.h"
 #include "absl/time/time.h"
@@ -34,6 +32,7 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/service/compiler.h"
 #include "xla/service/executable.h"
+#include "xla/service/gpu/autotuning/autotuner_util.h"
 #include "xla/service/gpu/gpu_executable_run_options.h"
 #include "xla/service/gpu/ir_emission_utils.h"
 #include "xla/service/maybe_owning_device_memory.h"
@@ -41,12 +40,12 @@ limitations under the License.
 #include "xla/shape.h"
 #include "xla/shape_util.h"
 #include "xla/stream_executor/device_memory.h"
-#include "xla/stream_executor/gpu/redzone_allocator.h"
 #include "xla/stream_executor/stream.h"
 #include "xla/tsl/platform/errors.h"
 #include "xla/tsl/platform/statusor.h"
 #include "xla/util.h"
 #include "xla/xla.pb.h"
+#include "tsl/profiler/lib/traceme.h"
 
 namespace xla {
 namespace gpu {
@@ -70,14 +69,12 @@ std::vector<ExecutionInput> ExecutionInputsFromBuffers(
 
 }  // namespace
 
-AutotunerCompileUtil::AutotunerCompileUtil(const AutotuneConfig& config,
-                                           std::unique_ptr<Compiler> compiler,
+AutotunerCompileUtil::AutotunerCompileUtil(std::unique_ptr<Compiler> compiler,
                                            se::StreamExecutor& stream_executor,
                                            se::Stream& stream,
                                            se::DeviceMemoryAllocator& allocator,
                                            const DebugOptions& opts)
-    : config_(config),
-      compiler_(std::move(compiler)),
+    : compiler_(std::move(compiler)),
       stream_executor_(stream_executor),
       stream_(stream),
       allocator_(allocator),
@@ -104,6 +101,7 @@ AutotunerCompileUtil::ProfileExecutable(
     Executable* executable, se::Stream* stream,
     absl::Span<se::DeviceMemoryBase const> input_buffers,
     absl::Span<Shape const> input_shapes) {
+  tsl::profiler::TraceMe traceme("ProfileExecutable");
   {
     std::vector<ExecutionInput> execution_inputs =
         ExecutionInputsFromBuffers(input_buffers, input_shapes);
@@ -129,11 +127,14 @@ AutotunerCompileUtil::ProfileExecutable(
 
 absl::StatusOr<std::unique_ptr<Executable>> AutotunerCompileUtil::Compile(
     GenerateModuleFn extractor) {
+  tsl::profiler::TraceMe traceme("AutotunerCompile");
   absl::StatusOr<std::unique_ptr<HloModule>> new_hlo_module = extractor(opts_);
   if (new_hlo_module.status().GetPayload(kUncompilableFusion).has_value()) {
     // Incompatible value of split-k is an example of an expected failure.
+    VLOG(5) << "Module with uncompilable fusion";
     return std::unique_ptr<Executable>();
-  } else if (!new_hlo_module.status().ok()) {
+  }
+  if (!new_hlo_module.status().ok()) {
     return new_hlo_module.status();
   }
 
@@ -143,9 +144,12 @@ absl::StatusOr<std::unique_ptr<Executable>> AutotunerCompileUtil::Compile(
                                /*layout_canonicalization_callback=*/{},
                                /*is_autotuning_compilation=*/true});
   if (out.status().code() == absl::StatusCode::kResourceExhausted ||
-      out.status().code() == absl::StatusCode::kCancelled) {
+      out.status().code() == absl::StatusCode::kCancelled ||
+      out.status().code() == absl::StatusCode::kInvalidArgument) {
     // Being out of shared memory budget or registers is an expected failure.
     // Cancelling upon register spilling is also an expected failure.
+    VLOG(5) << "Compilation failed with status " << out.status()
+            << " that is ignored";
     return std::unique_ptr<Executable>();
   }
   return out;
@@ -157,7 +161,8 @@ absl::StatusOr<std::unique_ptr<HloModule>> AutotunerCompileUtil::ExtractModule(
 }
 
 /*static*/ absl::StatusOr<AutotunerCompileUtil> AutotunerCompileUtil::Create(
-    const AutotuneConfig& config, const DebugOptions& opts) {
+    const DeviceOrDevicelessConfig& config, const DebugOptions& opts) {
+  tsl::profiler::TraceMe traceme("AutotunerCreate");
   if (config.IsDeviceless()) {
     return absl::InvalidArgumentError(
         "Deviceless autotuning is not supported.");
@@ -167,13 +172,14 @@ absl::StatusOr<std::unique_ptr<HloModule>> AutotunerCompileUtil::ExtractModule(
   TF_ASSIGN_OR_RETURN(se::Stream* const stream, config.GetStream());
   TF_ASSIGN_OR_RETURN(std::unique_ptr<Compiler> compiler,
                       Compiler::GetForPlatform(stream_exec->GetPlatform()));
-  return AutotunerCompileUtil(config, std::move(compiler), *stream_exec,
-                              *stream, *allocator, opts);
+  return AutotunerCompileUtil(std::move(compiler), *stream_exec, *stream,
+                              *allocator, opts);
 }
 
 absl::StatusOr<ExecutionOutput> AutotunerCompileUtil::Execute(
     Executable& executable, std::vector<ExecutionInput> arguments,
     ExecutionProfile* profile) {
+  tsl::profiler::TraceMe traceme("AutotunerExecute");
   // Require exclusive GPU lock to prevent other runs during autotuning.
   GpuExecutableRunOptions gpu_opts;
   gpu_opts.set_requires_exclusive_lock_on_gpu();
@@ -191,7 +197,6 @@ absl::StatusOr<ExecutionOutput> AutotunerCompileUtil::Execute(
 
   return std::move(output);
 }
-
 
 }  // namespace gpu
 }  // namespace xla

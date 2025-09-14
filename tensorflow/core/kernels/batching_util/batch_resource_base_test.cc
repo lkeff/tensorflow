@@ -25,6 +25,7 @@ limitations under the License.
 #include <gtest/gtest.h>
 #include "absl/status/status.h"
 #include "absl/strings/string_view.h"
+#include "absl/synchronization/notification.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
 #include "absl/types/span.h"
@@ -443,12 +444,12 @@ TEST(RecordBatchDelayMetricsTest,
       batch.task(0).request_cost->GetMetrics(),
       UnorderedElementsAre(Pair("batching_delay_msecs",
                                 absl::ToDoubleMilliseconds(batch_timeout)),
-                           Pair("queueing_delay_msecs", 0)));
+                           Pair("batch_queueing_delay_msecs", 0)));
   EXPECT_THAT(batch.task(1).request_cost->GetMetrics(),
               UnorderedElementsAre(
                   Pair("batching_delay_msecs",
                        absl::ToDoubleMilliseconds(batch_timeout - task2_delay)),
-                  Pair("queueing_delay_msecs", 0)));
+                  Pair("batch_queueing_delay_msecs", 0)));
 }
 
 TEST(RecordBatchDelayMetricsTest,
@@ -476,12 +477,12 @@ TEST(RecordBatchDelayMetricsTest,
       UnorderedElementsAre(
           Pair("batching_delay_msecs",
                absl::ToDoubleMilliseconds(task2_delay + scheduling_delay)),
-          Pair("queueing_delay_msecs", 0)));
+          Pair("batch_queueing_delay_msecs", 0)));
   EXPECT_THAT(
       batch.task(1).request_cost->GetMetrics(),
       UnorderedElementsAre(Pair("batching_delay_msecs",
                                 absl::ToDoubleMilliseconds(scheduling_delay)),
-                           Pair("queueing_delay_msecs", 0)));
+                           Pair("batch_queueing_delay_msecs", 0)));
 }
 
 TEST(RecordBatchDelayMetricsTest, TwoRequestWithQueueingDelay) {
@@ -507,13 +508,13 @@ TEST(RecordBatchDelayMetricsTest, TwoRequestWithQueueingDelay) {
       batch.task(0).request_cost->GetMetrics(),
       UnorderedElementsAre(Pair("batching_delay_msecs",
                                 absl::ToDoubleMilliseconds(batch_timeout)),
-                           Pair("queueing_delay_msecs",
+                           Pair("batch_queueing_delay_msecs",
                                 absl::ToDoubleMilliseconds(queueing_delay))));
   EXPECT_THAT(batch.task(1).request_cost->GetMetrics(),
               UnorderedElementsAre(
                   Pair("batching_delay_msecs",
                        absl::ToDoubleMilliseconds(batch_timeout - task2_delay)),
-                  Pair("queueing_delay_msecs",
+                  Pair("batch_queueing_delay_msecs",
                        absl::ToDoubleMilliseconds(queueing_delay))));
 }
 
@@ -541,13 +542,13 @@ TEST(RecordBatchDelayMetricsTest,
               UnorderedElementsAre(
                   Pair("batching_delay_msecs",
                        absl::ToDoubleMilliseconds(batch_timeout)),
-                  Pair("queueing_delay_msecs",
+                  Pair("batch_queueing_delay_msecs",
                        absl::ToDoubleMilliseconds(task2_delay - batch_timeout +
                                                   queueing_delay))));
   EXPECT_THAT(
       batch.task(1).request_cost->GetMetrics(),
       UnorderedElementsAre(Pair("batching_delay_msecs", 0),
-                           Pair("queueing_delay_msecs",
+                           Pair("batch_queueing_delay_msecs",
                                 absl::ToDoubleMilliseconds(queueing_delay))));
 }
 
@@ -569,12 +570,12 @@ class BatchResourceBaseTest : public ::testing::Test {
       process_func_batch_called_.Notify();
     }
 
-    Notification& process_func_batch_called() {
+    absl::Notification& process_func_batch_called() {
       return process_func_batch_called_;
     }
 
    private:
-    mutable Notification process_func_batch_called_;
+    mutable absl::Notification process_func_batch_called_;
   };
 
   BatchResourceBaseTest() {

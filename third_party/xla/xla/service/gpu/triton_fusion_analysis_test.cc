@@ -680,7 +680,7 @@ e {
                                                ->called_computations()[0];
   EXPECT_THAT(
       TritonFusionAnalysis::Execute(dot_computation),
-      tsl::testing::StatusIs(absl::StatusCode::kFailedPrecondition,
+      absl_testing::StatusIs(absl::StatusCode::kFailedPrecondition,
                              ::testing::HasSubstr("Unsupported broadcast")));
 }
 
@@ -837,35 +837,6 @@ ENTRY e {
                                     /*broadcast_multiplier=*/1)));
 }
 
-TEST_F(TritonDotAnalysisTest, SparseDot) {
-  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
-                          ParseAndReturnVerifiedModule(R"(
-triton_gemm {
-  lhs = bf16[5,16] parameter(0)
-  rhs = bf16[32,10] parameter(1)
-  meta = u16[5,2] parameter(2)
-  ROOT dot = f32[5,10] dot(lhs, rhs, meta),
-      lhs_contracting_dims={1}, rhs_contracting_dims={0}, sparsity=L.1@2:4
-}
-
-ENTRY main {
-  lhs = bf16[5,16] parameter(0)
-  rhs = bf16[32,10] parameter(1)
-  meta = u16[5,2] parameter(2)
-  ROOT out = f32[5,10] fusion(lhs, rhs, meta),
-      kind=kCustom, calls=triton_gemm, backend_config={kind:"__triton_gemm"}
-}
-)"));
-
-  const HloComputation* dot_computation =
-      module->entry_computation()->root_instruction()->called_computations()[0];
-  TF_ASSERT_OK_AND_ASSIGN(const auto analysis,
-                          TritonFusionAnalysis::Execute(*dot_computation));
-  EXPECT_THAT(*analysis.IterSpec(TritonFusionAnalysis::Scope::META,
-                                 dot_computation->parameter_instruction(2), 0),
-              ::testing::SizeIs(1));
-}
-
 TEST_F(TritonDotAnalysisTest, QueryScopeAlwaysWorks) {
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
                           ParseAndReturnVerifiedModule(R"(
@@ -946,6 +917,38 @@ triton_gemm_dot {
       ElementsAre(FieldsAre(/*stride=*/1, /*count=*/2048, /*slice_start=*/0,
                             /*slice_limit=*/2048, ElementsAre(2048),
                             /*broadcast_multiplier=*/1)));
+}
+
+TEST_F(TritonDotAnalysisTest, ScaledDotIsSupported) {
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
+                          ParseAndReturnVerifiedModule(R"(
+HloModule test
+
+scaled_dot {
+  %lhs = f32[4,128,1024] parameter(0)
+  %lhs_scale = f32[4,128,32] parameter(1)
+  %rhs = f32[4,1024,256] parameter(2)
+  %rhs_scale = f32[4,32,256] parameter(3)
+  ROOT %dot = f32[4,128,256] scaled-dot(%lhs, %lhs_scale, %rhs, %rhs_scale),
+      lhs_batch_dims={0}, lhs_contracting_dims={2},
+      rhs_batch_dims={0}, rhs_contracting_dims={1}
+})"));
+  const HloComputation* dot_computation = *module->computations().begin();
+  TF_ASSERT_OK_AND_ASSIGN(const auto analysis,
+                          TritonFusionAnalysis::Execute(*dot_computation));
+  const HloInstruction* lhs = dot_computation->parameter_instruction(0);
+  const HloInstruction* lhs_scale = dot_computation->parameter_instruction(1);
+  const HloInstruction* rhs = dot_computation->parameter_instruction(2);
+  const HloInstruction* rhs_scale = dot_computation->parameter_instruction(3);
+
+  using Scope = TritonFusionAnalysis::Scope;
+  EXPECT_EQ(*analysis.ScopeParameters(Scope::LHS).begin(), lhs);
+  EXPECT_EQ(*analysis.ScopeParameters(Scope::LHS_SCALE).begin(), lhs_scale);
+  EXPECT_EQ(*analysis.ScopeParameters(Scope::RHS).begin(), rhs);
+  EXPECT_EQ(*analysis.ScopeParameters(Scope::RHS_SCALE).begin(), rhs_scale);
+  for (const auto& hlo : dot_computation->instructions()) {
+    EXPECT_TRUE(analysis.QueryInstructionScope(*hlo).has_value());
+  }
 }
 
 }  // namespace

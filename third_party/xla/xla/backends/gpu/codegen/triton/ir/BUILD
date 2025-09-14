@@ -1,4 +1,5 @@
 load("@llvm-project//mlir:tblgen.bzl", "gentbl_cc_library", "td_library")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
 
 package(
     # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
@@ -58,6 +59,8 @@ gentbl_cc_library(
     name = "triton_xla_attrs_inc_gen",
     strip_include_prefix = ".",
     tbl_outs = {
+        "triton_xla_enums.h.inc": ["-gen-enum-decls"],
+        "triton_xla_enums.cc.inc": ["-gen-enum-defs"],
         "triton_xla_attrs.h.inc": [
             "-gen-attrdef-decls",
             "-attrdefs-dialect=triton_xla",
@@ -93,7 +96,6 @@ cc_library(
         "@llvm-project//mlir:InferTypeOpInterface",
         "@llvm-project//mlir:SideEffectInterfaces",
         "@llvm-project//mlir:Support",
-        "@llvm-project//mlir:ViewLikeInterface",
         "@triton//:TritonDialects",
     ],
 )

@@ -65,6 +65,7 @@ limitations under the License.
 #include "llvm/Support/Casting.h"
 #include "llvm/TargetParser/Triple.h"
 #include "mlir/IR/MLIRContext.h"
+#include "xla/backends/cpu/codegen/kernel_api_ir_builder.h"
 #include "xla/backends/cpu/codegen/target_machine_features.h"
 #include "xla/hlo/ir/collective_device_list.h"
 #include "xla/hlo/ir/hlo_casting_utils.h"
@@ -168,6 +169,7 @@ IrEmitter::IrEmitter(mlir::MLIRContext* mlir_context,
   absl::c_sort(thread_local_computations_);
   absl::c_sort(global_computations_);
   TF_CHECK_OK(s) << "Should have failed buffer assignment.";
+  SetModuleMemoryRegionName(*module_, "ir_emitter");
 }
 
 IrEmitter::~IrEmitter() {
@@ -798,10 +800,18 @@ absl::Status IrEmitter::HandleDot(HloInstruction* dot) {
           << llvm_ir::DumpToString(target_array.GetBasePointer());
 
   // Dot operation is complicated so we delegate to a helper class.
-  return EmitDotOperation(
-      *dot, target_array, lhs_array, rhs_array,
-      /*addend_array=*/nullptr, GetExecutableRunOptionsArgument(), b(),
-      hlo_module_config_, target_machine_features_, allow_runtime_calls_);
+  TF_ASSIGN_OR_RETURN(
+      DotOpWorkGroupDim num_workgroups,
+      EmitDotOperation(*dot, target_array, lhs_array, rhs_array,
+                       /*addend_array=*/nullptr,
+                       /*work_group_id=*/{b()->getInt64(0), b()->getInt64(0)},
+                       GetExecutableRunOptionsArgument(), b(),
+                       hlo_module_config_, target_machine_features_,
+                       allow_runtime_calls_, false));
+  DCHECK_EQ(num_workgroups.x, 1);
+  DCHECK_EQ(num_workgroups.y, 1);
+
+  return absl::OkStatus();
 }
 
 absl::Status IrEmitter::HandleConvolution(HloInstruction* convolution) {
@@ -892,9 +902,6 @@ absl::Status IrEmitter::HandleConvolution(HloInstruction* convolution) {
       PrimitiveType primitive_type = lhs->shape().element_type();
       bool multi_threaded =
           hlo_module_config_.debug_options().xla_cpu_multi_thread_eigen();
-      bool use_mkl_dnn =
-          hlo_module_config_.debug_options().xla_cpu_use_mkl_dnn() &&
-          convolution->feature_group_count() == 1;
       bool use_acl = hlo_module_config_.debug_options().xla_cpu_use_acl();
 
       auto valid_num_dims = [](absl::Span<const int64_t> xs) {
@@ -918,10 +925,8 @@ absl::Status IrEmitter::HandleConvolution(HloInstruction* convolution) {
                        ? runtime::kEigenConv2DF16SymbolName
                        : runtime::kEigenSingleThreadedConv2DF16SymbolName)
                 : (multi_threaded
-                       ? (use_mkl_dnn
-                              ? runtime::kMKLConv2DF32SymbolName
-                              : (use_acl ? runtime::kACLConv2DF32SymbolName
-                                         : runtime::kEigenConv2DF32SymbolName))
+                       ? (use_acl ? runtime::kACLConv2DF32SymbolName
+                                  : runtime::kEigenConv2DF32SymbolName)
                        : runtime::kEigenSingleThreadedConv2DF32SymbolName);
       } else if (input_dims.size() == 3) {
         fn_name =
@@ -934,10 +939,6 @@ absl::Status IrEmitter::HandleConvolution(HloInstruction* convolution) {
                        : runtime::kEigenSingleThreadedConv3DF32SymbolName);
       } else {
         LOG(FATAL) << "Invalid number of dimensions " << input_dims.size();
-      }
-      if (!multi_threaded && use_mkl_dnn) {
-        LOG(WARNING) << "Using Eigen instead of MKL-DNN for single-threaded "
-                        "convolution.";
       }
       std::vector<llvm::Value*> args = {
           GetExecutableRunOptionsArgument(),
@@ -991,55 +992,7 @@ absl::Status IrEmitter::HandleConvolution(HloInstruction* convolution) {
 }
 
 absl::Status IrEmitter::HandleFft(HloInstruction* fft) {
-  auto operand = fft->operand(0);
-  TF_RETURN_IF_ERROR(ElementTypesSameAndSupported(
-      /*instruction=*/*fft, /*operands=*/{operand},
-      /*supported_types=*/{F32, F64, C64, C128}));
-  TF_RET_CHECK(LayoutUtil::IsMonotonicWithDim0Major(operand->shape().layout()));
-  TF_RET_CHECK(LayoutUtil::IsMonotonicWithDim0Major(fft->shape().layout()));
-  VLOG(3) << "operand=" << ShapeUtil::HumanStringWithLayout(operand->shape());
-  VLOG(3) << "fft=" << ShapeUtil::HumanStringWithLayout(fft->shape());
-
-  llvm::Value* operand_address = GetEmittedValueFor(operand);
-  TF_RETURN_IF_ERROR(EmitTargetAddressForOp(fft));
-
-  const std::vector<int64_t>& fft_length = fft->fft_length();
-  const int fft_rank = fft_length.size();
-
-  // Flatten operand batches.
-  absl::InlinedVector<int64_t, 4> operand_shape_flat(fft_rank + 1);
-  int64_t input_batch = 1;
-  int64_t input_batch_length = fft->shape().dimensions().size() - fft_rank;
-  for (int i = 0; i < input_batch_length; i++) {
-    input_batch *= operand->shape().dimensions(i);
-  }
-  operand_shape_flat[0] = input_batch;
-  for (int i = 0; i < fft_rank; ++i) {
-    operand_shape_flat[i + 1] =
-        operand->shape().dimensions(i + input_batch_length);
-  }
-
-  // Args have been computed, make the call.
-  bool multi_threaded_eigen =
-      hlo_module_config_.debug_options().xla_cpu_multi_thread_eigen();
-  const char* fn_name = multi_threaded_eigen
-                            ? runtime::kLegacyDuccFftSymbolName
-                            : runtime::kDuccSingleThreadedFftSymbolName;
-  auto* fft_lengths =
-      EmitGlobalForLiteral(LiteralUtil::CreateR1<int64_t>(fft_length));
-  auto* input_shape =
-      EmitGlobalForLiteral(LiteralUtil::CreateR1<int64_t>(operand_shape_flat));
-  EmitCallToFunc(fn_name,
-                 {GetExecutableRunOptionsArgument(), GetEmittedValueFor(fft),
-                  operand_address, b()->getInt32(fft->fft_type()),
-                  b()->getInt32(operand->shape().element_type() == F64 ||
-                                operand->shape().element_type() == C128),
-                  b()->getInt32(fft_rank), input_shape, fft_lengths},
-                 b()->getVoidTy(), /*does_not_throw=*/true,
-                 /*only_accesses_arg_memory=*/false,
-                 /*only_accesses_inaccessible_mem_or_arg_mem=*/true);
-
-  return absl::OkStatus();
+  return Unimplemented("Fft is not implemented in the legacy emitter");
 }
 
 absl::Status IrEmitter::HandleAllReduceSingleReplica(HloInstruction* crs) {
@@ -2247,10 +2200,16 @@ absl::Status IrEmitter::HandleFusion(HloInstruction* fusion) {
     llvm_ir::IrArray addend_array(
         GetIrArrayFor(fusion->operand(addend_param_number)));
 
-    TF_RETURN_IF_ERROR(
-        EmitDotOperation(*dot, target_array, lhs_array, rhs_array,
-                         &addend_array, GetExecutableRunOptionsArgument(), b(),
-                         hlo_module_config_, target_machine_features_));
+    TF_ASSIGN_OR_RETURN(
+        DotOpWorkGroupDim num_workgroups,
+        EmitDotOperation(
+            *dot, target_array, lhs_array, rhs_array, &addend_array,
+            /*work_group_id=*/{b()->getInt64(0), b()->getInt64(0)},
+            GetExecutableRunOptionsArgument(), b(), hlo_module_config_,
+            target_machine_features_, true, false));
+    DCHECK_EQ(num_workgroups.x, 1);
+    DCHECK_EQ(num_workgroups.y, 1);
+
     return absl::OkStatus();
   } else {
     return Unimplemented("Fusion kind not implemented on CPU");
@@ -2520,7 +2479,7 @@ absl::Status IrEmitter::HandleOneDnnMatMulCalls(
   llvm::Value* nargs_val = b()->getInt64(nargs);
   llvm::Value* nargs_ptr =
       llvm_ir::EmitAllocaAtFunctionEntry(i64_type, "nargs", b());
-  b()->CreateLifetimeStart(nargs_ptr, b()->getInt64(-1));
+  b()->CreateLifetimeStart(nargs_ptr);
   b()->CreateStore(nargs_val, nargs_ptr);
   args_val = b()->CreateInsertValue(args_val, nargs_ptr, arg_indx++);
 
@@ -2547,7 +2506,7 @@ absl::Status IrEmitter::HandleOneDnnMatMulCalls(
 
   llvm::Value* args_ptr =
       llvm_ir::EmitAllocaAtFunctionEntry(ptr_array_type, "matmul.args", b());
-  b()->CreateLifetimeStart(args_ptr, b()->getInt64(-1));
+  b()->CreateLifetimeStart(args_ptr);
   b()->CreateStore(args_val, args_ptr);
 
   TF_RETURN_IF_ERROR(EmitTargetAddressForOp(custom_call));
@@ -2591,8 +2550,8 @@ absl::Status IrEmitter::HandleOneDnnMatMulCalls(
                  b()->getVoidTy());
 
   // Lifetime ends for all stack allocations.
-  b()->CreateLifetimeEnd(nargs_ptr, b()->getInt64(-1));
-  b()->CreateLifetimeEnd(args_ptr, b()->getInt64(-1));
+  b()->CreateLifetimeEnd(nargs_ptr);
+  b()->CreateLifetimeEnd(args_ptr);
   for (auto& alloca : operands_stack_alloca) {
     alloca.EmitLifetimeEnd();
   }
@@ -2625,7 +2584,7 @@ absl::Status IrEmitter::HandleOneDnnConvolution(HloInstruction* custom_call) {
   llvm::Value* nargs_val = b()->getInt64(nargs);
   llvm::Value* nargs_ptr =
       llvm_ir::EmitAllocaAtFunctionEntry(i64_type, "nargs", b());
-  b()->CreateLifetimeStart(nargs_ptr, b()->getInt64(-1));
+  b()->CreateLifetimeStart(nargs_ptr);
   b()->CreateStore(nargs_val, nargs_ptr);
   args_val = b()->CreateInsertValue(args_val, nargs_ptr, arg_indx++);
 
@@ -2649,7 +2608,7 @@ absl::Status IrEmitter::HandleOneDnnConvolution(HloInstruction* custom_call) {
 
   llvm::Value* args_ptr = llvm_ir::EmitAllocaAtFunctionEntry(
       ptr_array_type, "convolution.args", b());
-  b()->CreateLifetimeStart(args_ptr, b()->getInt64(-1));
+  b()->CreateLifetimeStart(args_ptr);
   b()->CreateStore(args_val, args_ptr);
 
   TF_RETURN_IF_ERROR(EmitTargetAddressForOp(custom_call));
@@ -2691,8 +2650,8 @@ absl::Status IrEmitter::HandleOneDnnConvolution(HloInstruction* custom_call) {
                  b()->getVoidTy());
 
   // Lifetime ends for all stack allocations.
-  b()->CreateLifetimeEnd(nargs_ptr, b()->getInt64(-1));
-  b()->CreateLifetimeEnd(args_ptr, b()->getInt64(-1));
+  b()->CreateLifetimeEnd(nargs_ptr);
+  b()->CreateLifetimeEnd(args_ptr);
   for (StackAlloca& alloca : operands_stack_alloca) {
     alloca.EmitLifetimeEnd();
   }
@@ -2726,7 +2685,7 @@ absl::Status IrEmitter::HandleOneDnnLayerNorm(HloInstruction* custom_call) {
   llvm::Value* nargs_val = b()->getInt64(nargs);
   llvm::Value* nargs_ptr =
       llvm_ir::EmitAllocaAtFunctionEntry(i64_type, "nargs", b());
-  b()->CreateLifetimeStart(nargs_ptr, b()->getInt64(-1));
+  b()->CreateLifetimeStart(nargs_ptr);
   b()->CreateStore(nargs_val, nargs_ptr);
   args_val = b()->CreateInsertValue(args_val, nargs_ptr, arg_indx++);
 
@@ -2753,7 +2712,7 @@ absl::Status IrEmitter::HandleOneDnnLayerNorm(HloInstruction* custom_call) {
 
   llvm::Value* args_ptr =
       llvm_ir::EmitAllocaAtFunctionEntry(ptr_array_type, "layernorm.args", b());
-  b()->CreateLifetimeStart(args_ptr, b()->getInt64(-1));
+  b()->CreateLifetimeStart(args_ptr);
   b()->CreateStore(args_val, args_ptr);
 
   TF_RETURN_IF_ERROR(EmitTargetAddressForOp(custom_call));
@@ -2764,11 +2723,11 @@ absl::Status IrEmitter::HandleOneDnnLayerNorm(HloInstruction* custom_call) {
                  {result_stack_alloca.value, args_ptr}, b()->getVoidTy());
 
   // Lifetime ends for all stack allocations.
-  b()->CreateLifetimeEnd(nargs_ptr, b()->getInt64(-1));
+  b()->CreateLifetimeEnd(nargs_ptr);
   for (int i = 0; i < num_operands; ++i) {
     operands_stack_alloca[i].EmitLifetimeEnd();
   }
-  b()->CreateLifetimeEnd(args_ptr, b()->getInt64(-1));
+  b()->CreateLifetimeEnd(args_ptr);
   result_stack_alloca.EmitLifetimeEnd();
 
   return absl::OkStatus();

@@ -24,13 +24,15 @@
 #include <string>
 #include <vector>
 
-#include "absl/base/nullability.h"
+#include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
+#include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
 #include "llvm/Support/ExtensibleRTTI.h"
+#include "xla/pjrt/pjrt_layout.h"
 #include "xla/python/ifrt/array.h"
 #include "xla/python/ifrt/array_spec.h"
 #include "xla/python/ifrt/attribute_map.h"
@@ -71,16 +73,14 @@ class Client final : public llvm::RTTIExtends<Client, xla::ifrt::Client> {
       const void* data, xla::ifrt::DType dtype, xla::ifrt::Shape shape,
       std::optional<absl::Span<const int64_t>> byte_strides,
       xla::ifrt::ShardingRef sharding, HostBufferSemantics semantics,
-      std::function<void()> on_done_with_host_buffer,
-      tsl::RCReference<xla::ifrt::UserContext> user_context) override;
+      std::function<void()> on_done_with_host_buffer) override;
   absl::StatusOr<std::vector<xla::ifrt::ArrayRef>>
   MakeArraysFromHostBufferShards(
       absl::Span<MakeArraysFromHostBufferShardsSpec> specs,
-      HostBufferSemantics semantics,
-      tsl::RCReference<xla::ifrt::UserContext> user_context) override;
+      HostBufferSemantics semantics) override;
   absl::StatusOr<std::vector<xla::ifrt::ArrayRef>> MakeErrorArrays(
-      const absl::Status& error, absl::Span<const ArraySpec> array_specs,
-      tsl::RCReference<UserContext> user_context) override;
+      const absl::Status& error,
+      absl::Span<const ArraySpec> array_specs) override;
   absl::StatusOr<xla::ifrt::ArrayRef> AssembleArrayFromSingleDeviceArrays(
       DType dtype, Shape shape, ShardingRef sharding,
       absl::Span<xla::ifrt::ArrayRef> arrays,
@@ -96,11 +96,18 @@ class Client final : public llvm::RTTIExtends<Client, xla::ifrt::Client> {
       const RemapPlan& plan, absl::Span<xla::ifrt::ArrayRef> arrays,
       ArrayCopySemantics semantics) override;
 
+  absl::StatusOr<std::vector<xla::ifrt::ArrayRef>> ReshardArrays(
+      absl::Span<ArrayRef> arrays, absl::Span<const ArraySpec> specs,
+      ArrayCopySemantics semantics) override {
+    return absl::UnimplementedError(
+        "ReshardArrays is not supported for the IFRT proxy client.");
+  }
+
   xla::ifrt::Future<> GetReadyFuture(
-      absl::Span<const tsl::RCReference<Value>> values) override;
+      absl::Span<const ValueRef> values) override;
 
   absl::StatusOr<tsl::RCReference<Tuple>> MakeTuple(
-      absl::Span<tsl::RCReference<Value>> values) override {
+      absl::Span<ValueRef> values) override {
     return absl::UnimplementedError(
         "MakeTuple is not supported for the IFRT proxy client.");
   }
@@ -133,7 +140,7 @@ class Client final : public llvm::RTTIExtends<Client, xla::ifrt::Client> {
     return absl::UnimplementedError(
         "LookupAddressableDevice is not supported for the IFRT proxy client.");
   }
-  xla::ifrt::DeviceListRef MakeDeviceList(
+  absl::StatusOr<xla::ifrt::DeviceListRef> MakeDeviceList(
       absl::Span<xla::ifrt::Device* const> devices) const override;
   xla::ifrt::Compiler* GetDefaultCompiler() override {
     return &default_compiler_;
@@ -143,7 +150,7 @@ class Client final : public llvm::RTTIExtends<Client, xla::ifrt::Client> {
     return absl::UnimplementedError(
         "GetTopologyForDevices is not supported for the IFRT proxy client.");
   }
-  absl::StatusOr<std::shared_ptr<const xla::PjRtLayout>> GetDefaultLayout(
+  absl::StatusOr<std::shared_ptr<const xla::PjRtLayout>> GetDefaultPjRtLayout(
       xla::ifrt::DType dtype, absl::Span<const int64_t> dims,
       xla::ifrt::Device* device,
       xla::ifrt::MemoryKind memory_kind) const override;
@@ -156,6 +163,27 @@ class Client final : public llvm::RTTIExtends<Client, xla::ifrt::Client> {
   static char ID;  // NOLINT
 
  private:
+  struct LayoutKey {
+    xla::ifrt::DType dtype;
+    std::vector<int64_t> dims;
+    xla::ifrt::MemoryKind memory_kind;
+    std::string device_summary;
+
+    bool operator==(const LayoutKey& other) const {
+      return dtype == other.dtype && dims == other.dims &&
+             memory_kind == other.memory_kind &&
+             device_summary == other.device_summary;
+    }
+
+    template <typename H>
+    friend H AbslHashValue(H h, const LayoutKey& key) {
+      h = H::combine(std::move(h), key.dtype, key.memory_kind,
+                     key.device_summary);
+      h = H::combine_contiguous(std::move(h), key.dims.data(), key.dims.size());
+      return h;
+    }
+  };
+
   Client(std::shared_ptr<RpcHelper> rpc_helper, uint64_t session_id,
          std::string platform_name, std::string platform_version,
          uint64_t platform_id, uint64_t process_index, std::string runtime_type,
@@ -163,7 +191,8 @@ class Client final : public llvm::RTTIExtends<Client, xla::ifrt::Client> {
          std::vector<xla::ifrt::Device*> primary_device_ptrs,
          std::vector<xla::ifrt::Device*> addressable_device_ptrs,
          std::vector<xla::ifrt::Device*> all_device_ptrs,
-         absl::flat_hash_map<int, std::unique_ptr<Memory>> memories);
+         absl::flat_hash_map<int, std::unique_ptr<Memory>> memories,
+         AttributeMap attributes);
 
   // rpc_helper_ will be referenced by various IFRT objects whose lifetime is
   // managed by the layer above the IFRT interface, so shared_ptr is
@@ -186,6 +215,10 @@ class Client final : public llvm::RTTIExtends<Client, xla::ifrt::Client> {
   const absl::flat_hash_map<int, std::unique_ptr<Memory>> memories_;
 
   Compiler default_compiler_;
+
+  mutable absl::Mutex mu_;
+  mutable absl::flat_hash_map<LayoutKey, std::shared_ptr<const xla::PjRtLayout>>
+      layout_cache_ ABSL_GUARDED_BY(mu_);
 };
 
 }  // namespace proxy

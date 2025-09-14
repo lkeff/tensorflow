@@ -81,7 +81,15 @@ const char kXlaNoOpSchedulingGroup[] = "noop";
 
 const char kMustFuseAttr[] = "MUST_FUSE";
 
+const char kFuseLimitAttr[] = "FUSE_LIMIT";
+
 const char kMaximalFuseAttr[] = "MAXIMAL_FUSE";
 
 const char kCollectivesGroupAttr[] = "_collectives_group";
+
+const char kNumSlotVariables[] = "_num_slot_variables";
+
+const char kNumHyperparameters[] = "_num_hyperparameters";
+
+const char kLogTag[] = "_xla_log_tag";
 }  // namespace xla

@@ -1,6 +1,7 @@
 load("@llvm-project//mlir:tblgen.bzl", "gentbl_cc_library")
 load("@local_xla//xla/tsl:tsl.default.bzl", "tsl_pybind_extension")
 load("@local_xla//xla/tsl/platform:build_config_root.bzl", "if_static")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("//tensorflow:pytype.default.bzl", "pytype_strict_library")
 load("//tensorflow:strict.default.bzl", "py_strict_test")
 load("//tensorflow:tensorflow.bzl", "tf_cc_test")
@@ -95,7 +96,7 @@ cc_library(
         "transforms/fold_broadcast_pass.cc",
     ],
     hdrs = [
-        "transforms/stablehlo_passes.h",
+        "transforms/fold_broadcast_pass.h",
     ],
     compatible_with = get_compatible_with_portable(),
     copts = [
@@ -150,6 +151,7 @@ cc_library(
         "transforms/legalize_tf_passes.h",
     ],
     compatible_with = get_compatible_with_portable(),
+    visibility = ["//visibility:public"],
     deps = [
         ":legalize_tf_patterns_inc_gen",
         ":legalize_utils",
@@ -197,6 +199,7 @@ cc_library(
     copts = [
         "-Ithird_party",
     ],
+    visibility = ["//visibility:public"],
     deps = [
         ":legalize_tf",
         "//tensorflow/compiler/mlir/tensorflow",
@@ -261,43 +264,15 @@ cc_library(
         "transforms/mhlo_passes/fuse_convolution_pass.cc",
     ],
     hdrs = [
-        "transforms/stablehlo_passes.h",
+        "transforms/mhlo_passes/fuse_convolution_pass.h",
     ],
     compatible_with = get_compatible_with_portable(),
     copts = [
         "-Ithird_party",
     ],
+    visibility = ["//visibility:public"],
     deps = [
         "//tensorflow/compiler/mlir/quantization/common:attrs_and_constraints",
-        "//tensorflow/compiler/mlir/utils:validators",
-        "@llvm-project//llvm:Support",
-        "@llvm-project//mlir:Dialect",
-        "@llvm-project//mlir:FuncDialect",
-        "@llvm-project//mlir:IR",
-        "@llvm-project//mlir:Pass",
-        "@llvm-project//mlir:ShapeDialect",
-        "@llvm-project//mlir:Support",
-        "@llvm-project//mlir:TransformUtils",
-        "@llvm-project//mlir:Transforms",
-        "@local_xla//xla/mlir_hlo",
-    ],
-    alwayslink = 1,
-)
-
-cc_library(
-    name = "tf_fuse_convolution_pass",
-    srcs = [
-        "transforms/mhlo_passes/tf_fuse_convolution_pass.cc",
-    ],
-    hdrs = [
-        "transforms/tf_stablehlo_passes.h",
-    ],
-    compatible_with = get_compatible_with_portable(),
-    copts = [
-        "-Ithird_party",
-    ],
-    deps = [
-        "//tensorflow/compiler/mlir/quantization/common:tf_attrs_and_constraints",
         "//tensorflow/compiler/mlir/utils:validators",
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:Dialect",
@@ -319,12 +294,13 @@ cc_library(
         "transforms/mhlo_passes/unfuse_batch_norm_pass.cc",
     ],
     hdrs = [
-        "transforms/stablehlo_passes.h",
+        "transforms/mhlo_passes/unfuse_batch_norm_pass.h",
     ],
     compatible_with = get_compatible_with_portable(),
     copts = [
         "-Ithird_party",
     ],
+    visibility = ["//visibility:public"],
     deps = [
         "//tensorflow/compiler/mlir/tensorflow:tensorflow_ops",
         "//tensorflow/compiler/mlir/tensorflow:tensorflow_types",
@@ -352,6 +328,7 @@ cc_library(
     copts = [
         "-Ithird_party",
     ],
+    visibility = ["//visibility:public"],
     deps = [
         "//tensorflow/compiler/mlir/tensorflow",
         "@llvm-project//llvm:Support",

@@ -23,8 +23,10 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 #include "absl/status/statusor.h"
+#include "xla/backends/gpu/runtime/thunk.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_opcode.h"
+#include "xla/hlo/ir/hlo_print_options.h"
 #include "xla/hlo/ir/hlo_schedule.h"
 #include "xla/hlo/parser/hlo_parser.h"
 #include "xla/hlo/testlib/filecheck.h"
@@ -37,9 +39,9 @@ limitations under the License.
 #include "xla/stream_executor/device_description.h"
 #include "xla/tests/hlo_test_base.h"
 #include "xla/tsl/lib/core/status_test_util.h"
+#include "xla/tsl/platform/status.h"
+#include "xla/tsl/platform/statusor.h"
 #include "xla/xla.pb.h"
-#include "tsl/platform/status.h"
-#include "tsl/platform/statusor.h"
 
 namespace xla::gpu {
 namespace {
@@ -101,9 +103,9 @@ TEST_F(CommandBufferSchedulingTest, SingleCommandBuffer) {
 // CHECK: %command_buffer ([[P0:.+]]: s32[], [[P1:.+]]: s32[]) -> (s32[], s32[]) {
 // CHECK:   %[[P0]] = s32[] parameter(0)
 // CHECK:   %[[P1]] = s32[] parameter(1)
-// CHECK:   %fusion = s32[] fusion(%[[P0]], %[[P1]]), kind=kLoop, calls=%fused_computation
-// CHECK:   %fusion.1 = s32[] fusion(%[[P0]], %[[P1]]), kind=kLoop, calls=%fused_computation.1
-// CHECK:   ROOT %tuple = (s32[], s32[]) tuple(%fusion, %fusion.1)
+// CHECK:   %fusion.2 = s32[] fusion(%[[P0]], %[[P1]]), kind=kLoop, calls=%fused_computation
+// CHECK:   %fusion.3 = s32[] fusion(%[[P0]], %[[P1]]), kind=kLoop, calls=%fused_computation.1
+// CHECK:   ROOT %tuple = (s32[], s32[]) tuple(%fusion.2, %fusion.3)
 // CHECK: }
 //
 // CHECK: ENTRY %main (a: s32[], b: s32[]) -> s32[] {
@@ -173,7 +175,7 @@ TEST_F(CommandBufferSchedulingTest, MultipleCommandBuffers) {
 // CHECK:    ROOT {{.*}} = s32[] fusion(%[[F0]], %[[P2]]), kind=kLoop, calls=%fused_computation.1
 // CHECK:  }
 
-// CHECK:  %command_buffer.2 ([[P0:.+]]: s32[], [[P1:.+]]: s32[]) -> s32[] {
+// CHECK:  %command_buffer.1 ([[P0:.+]]: s32[], [[P1:.+]]: s32[]) -> s32[] {
 // CHECK:    %[[P0]] = s32[] parameter(0)
 // CHECK:    %[[P1]] = s32[] parameter(1)
 // CHECK:    %[[F2:.+]] = s32[] fusion(%[[P0]], %[[P1]]), kind=kLoop, calls=%fused_computation.2
@@ -188,7 +190,7 @@ TEST_F(CommandBufferSchedulingTest, MultipleCommandBuffers) {
 // CHECK:    %e = s32[] get-tuple-element(%c), index=1
 // CHECK:    %[[CMD0:.+]] = s32[] call(%a, %b, %d), to_apply=%command_buffer
 // CHECK:    %[[CALL:.+]] = s32[] custom-call(%[[CMD0]], %e), custom_call_target="some target"
-// CHECK:    %[[CMD1:.+]] = s32[] call(%[[CALL]], %a), to_apply=%command_buffer.2
+// CHECK:    %[[CMD1:.+]] = s32[] call(%[[CALL]], %a), to_apply=%command_buffer.1
 // CHECK:    ROOT {{.*}} = s32[] custom-call(%[[CMD1]]), custom_call_target="some target"
 // CHECK:  })";
 
@@ -437,8 +439,8 @@ TEST_F(CommandBufferSchedulingTest, DoNotCaptureUnmatchedAsyncDone) {
     CHECK: %command_buffer ([[P0:.+]]: s32[], [[P1:.+]]: s32[]) -> s32[] {
     CHECK:   %[[P0]] = s32[] parameter(0)
     CHECK:   %[[P1]] = s32[] parameter(1)
-    CHECK:   %fusion = s32[] fusion(%[[P0]], %[[P1]]), kind=kLoop, calls=%fused_computation
-    CHECK:   ROOT %fusion.1 = s32[] fusion(%[[P0]], %[[P1]]), kind=kLoop, calls=%fused_computation.1
+    CHECK:   %fusion.2 = s32[] fusion(%[[P0]], %[[P1]]), kind=kLoop, calls=%fused_computation
+    CHECK:   ROOT %fusion.3 = s32[] fusion(%[[P0]], %[[P1]]), kind=kLoop, calls=%fused_computation.1
     CHECK: }
 
     CHECK: ENTRY %main (a: s32[4], b: s32[]) -> s32[] {
@@ -1215,14 +1217,14 @@ TEST_F(CommandBufferSchedulingTest, AsyncDynamicMemcpyFusion) {
         c32 = s32[] constant(32)
         ROOT %slice = s32[32] dynamic-slice(p0, c32), dynamic_slice_sizes={32}
       }
-
+      
       %async_computation {
         p0 = s32[64] parameter(0)
         ROOT fusion0 = s32[32] fusion(p0), kind=kLoop,
           calls=%fused_computation,
           backend_config={"fusion_backend_config":{"kind":"__dynamic_memcpy"}}
       }
-
+      
       main {
         p0 = s32[64] parameter(0)
         async-start = ((s32[64]), s32[32]) async-start(p0),
@@ -1373,8 +1375,8 @@ TEST_F(CommandBufferSchedulingTest, MoveGTEs) {
 // CHECK:  %command_buffer ([[P0:.+]]: s32[], [[P1:.+]]: s32[]) -> s32[] {
 // CHECK:    %[[P0]] = s32[] parameter(0)
 // CHECK:    %[[P1]] = s32[] parameter(1)
-// CHECK:    %fusion0 = s32[] fusion(%[[P0]], %[[P0]]), kind=kLoop, calls=%fused_computation
-// CHECK:    ROOT %fusion1 = s32[] fusion(%fusion0, %[[P1]]), kind=kLoop, calls=%fused_computation.1
+// CHECK:    %fusion0.1 = s32[] fusion(%[[P0]], %[[P0]]), kind=kLoop, calls=%fused_computation
+// CHECK:    ROOT %fusion1.1 = s32[] fusion(%fusion0.1, %[[P1]]), kind=kLoop, calls=%fused_computation.1
 // CHECK:  }
 
 // CHECK:  ENTRY %main (x: s32[]) -> s32[] {
@@ -1386,6 +1388,40 @@ TEST_F(CommandBufferSchedulingTest, MoveGTEs) {
 
   RunAndFilecheckHloRewrite(hlo, CommandBufferScheduling(device_desc()),
                             expected, [](HloModule* module) {
+                              EXPECT_TRUE(module->has_schedule());
+                              TF_CHECK_OK(module->schedule().Verify());
+                            });
+}
+
+class CommandBufferSchedulingTestNoMinSize
+    : public CommandBufferSchedulingTest {
+ public:
+  DebugOptions GetDebugOptionsForTest() const override {
+    auto debug_options = CommandBufferSchedulingTest::GetDebugOptionsForTest();
+    debug_options.set_xla_gpu_graph_min_graph_size(1);
+    return debug_options;
+  }
+};
+
+TEST_F(CommandBufferSchedulingTestNoMinSize, BlockScaledDotGraphCaptureWorks) {
+  const std::string kHloText = R"(
+HloModule m, is_scheduled=true
+
+ENTRY e {
+  %lhs = f8e4m3fn[4,128,128] parameter(0)
+  %rhs = f8e4m3fn[4,128,128] parameter(1)
+  %lhs_scale = f8e8m0fnu[4,128,4] parameter(2)
+  %rhs_scale = f8e8m0fnu[4,128,4] parameter(3)
+  ROOT %result = f16[4,128,128] custom-call(%lhs, %rhs, %lhs_scale, %rhs_scale),
+      custom_call_target="__cudnn$blockScaledDot"
+})";
+
+  const std::string kExpected = R"(
+; CHECK: to_apply=%command_buffer
+})";
+
+  RunAndFilecheckHloRewrite(kHloText, CommandBufferScheduling(device_desc()),
+                            kExpected, [](HloModule* module) {
                               EXPECT_TRUE(module->has_schedule());
                               TF_CHECK_OK(module->schedule().Verify());
                             });

@@ -1,5 +1,7 @@
 """Provides build configuration for TensorFlow."""
 
+load("@rules_cc//cc:cc_library.bzl", _cc_library = "cc_library")
+load("@rules_cc//cc/common:cc_info.bzl", "CcInfo")
 load("@rules_java//java:defs.bzl", "java_test")
 load(
     "//tensorflow:py.default.bzl",
@@ -21,7 +23,6 @@ load(
     "if_mkl",
     "if_mkl_ml",
     "if_mkldnn_aarch64_acl",
-    "if_mkldnn_aarch64_acl_openmp",
     "if_mkldnn_openmp",
     "onednn_v3_define",
 )
@@ -72,9 +73,12 @@ load(
     _cc_header_only_library = "cc_header_only_library",
     _custom_op_cc_header_only_library = "custom_op_cc_header_only_library",
     _if_cuda_or_rocm = "if_cuda_or_rocm",
-    _if_cuda_tools = "if_cuda_tools",
     _if_nccl = "if_nccl",
     _transitive_hdrs = "transitive_hdrs",
+)
+load(
+    "@local_xla//xla/tsl:tsl.default.bzl",
+    _if_cuda_tools = "if_cuda_tools",
 )
 load(
     "@local_config_tensorrt//:build_defs.bzl",
@@ -464,7 +468,6 @@ def tf_copts(
         if_mkldnn_openmp(["-DENABLE_ONEDNN_OPENMP"]) +
         onednn_v3_define() +
         if_mkldnn_aarch64_acl(["-DDNNL_AARCH64_USE_ACL=1"]) +
-        if_mkldnn_aarch64_acl_openmp(["-DENABLE_ONEDNN_OPENMP"]) +
         if_zendnn(["-DAMD_ZENDNN"]) +
         if_enable_acl(["-DXLA_CPU_USE_ACL=1", "-fexceptions"]) +
         if_llvm_aarch32_available(["-DTF_LLVM_AARCH32_AVAILABLE=1"]) +
@@ -2104,7 +2107,10 @@ def tf_kernel_library(
 
 register_extension_info(
     extension = tf_kernel_library,
-    label_regex_for_dep = "{extension_name}",
+    label_regex_map = {
+        "deps": "deps:{extension_name}",
+        "gpu_deps": "deps:{extension_name}_gpu",
+    },
 )
 
 def tf_mkl_kernel_library(
@@ -2454,7 +2460,7 @@ def pywrap_tensorflow_macro_opensource(
     """Builds the pywrap_tensorflow_internal shared object."""
 
     if use_pywrap_rules():
-        native.py_library(
+        _plain_py_library(
             name = name,
             srcs = [],
             deps = [],
@@ -3092,8 +3098,7 @@ def pybind_library(
         **kwargs):
     # Mark common dependencies as required for build_cleaner.
     tags = tags + ["req_dep=" + clean_dep("//third_party/pybind11"), "req_dep=@local_config_python//:python_headers"]
-
-    native.cc_library(
+    _cc_library(
         name = name,
         copts = copts + ["-fexceptions"],
         features = features + [
@@ -3134,9 +3139,10 @@ def pybind_extension_opensource(
         testonly = None,
         visibility = None,
         win_def_file = None,
-        starlark_only = False):
+        starlark_only = False,
+        wrap_py_init = False):
     """Builds a generic Python extension module."""
-    _ignore = [enable_stub_generation, additional_stubgen_deps, module_name, starlark_only]  # buildifier: disable=unused-variable
+    _ignore = [enable_stub_generation, additional_stubgen_deps, module_name, starlark_only, wrap_py_init]  # buildifier: disable=unused-variable
     p = name.rfind("/")
     if p == -1:
         sname = name

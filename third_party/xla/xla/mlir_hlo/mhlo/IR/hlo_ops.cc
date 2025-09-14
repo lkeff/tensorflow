@@ -89,6 +89,7 @@ limitations under the License.
 #include "stablehlo/dialect/TypeInference.h"
 #include "utils/convert_op_folder.h"
 #include "utils/hlo_utils.h"
+#include "utils/unregistered_attributes.h"
 
 namespace mlir {
 #include "hlo_patterns.cc.inc"
@@ -124,7 +125,7 @@ struct AsyncBundleTypeStorage final
 
     // Copy in the element types into the trailing storage.
     std::uninitialized_copy(key.begin(), key.end(),
-                            result->getTrailingObjects<Type>());
+                            result->getTrailingObjects());
     return result;
   }
 
@@ -134,9 +135,7 @@ struct AsyncBundleTypeStorage final
   unsigned size() const { return numElements; }
 
   // Return the held types.
-  ArrayRef<Type> getTypes() const {
-    return {getTrailingObjects<Type>(), size()};
-  }
+  ArrayRef<Type> getTypes() const { return {getTrailingObjects(), size()}; }
 
   void getFlattenedTypes(SmallVectorImpl<Type>& types) {
     for (Type type : getTypes()) {
@@ -357,6 +356,8 @@ LogicalResult ReduceScatterOp::verify() {
   }
 
 INFER_RETURN_TYPE_COMPONENTS_FROM_OPERANDS(AddOp)
+INFER_RETURN_TYPE_COMPONENTS_FROM_OPERANDS(AcosOp)
+INFER_RETURN_TYPE_COMPONENTS_FROM_OPERANDS(AcoshOp)
 INFER_RETURN_TYPE_COMPONENTS_FROM_OPERANDS(AndOp)
 INFER_RETURN_TYPE_COMPONENTS_FROM_OPERANDS(Atan2Op)
 INFER_RETURN_TYPE_COMPONENTS_FROM_OPERANDS(CbrtOp)
@@ -1240,56 +1241,6 @@ LogicalResult RaggedDotOp::verify() {
         "is incompatible with return type of operation ", resultType, "");
   }
 
-  return success();
-}
-
-//===----------------------------------------------------------------------===//
-// SparseDotOp
-//===----------------------------------------------------------------------===//
-
-LogicalResult SparseDotOp::verify() {
-  RankedTensorType lhsType = dyn_cast<RankedTensorType>(getLhs().getType());
-  RankedTensorType rhsType = dyn_cast<RankedTensorType>(getRhs().getType());
-  // If either operand is unranked, static verification is not possible.
-  if (!lhsType || !rhsType) return success();
-
-  auto applySparsityDescriptor = [&](std::optional<SparsityDescriptorAttr> attr,
-                                     RankedTensorType* type) {
-    if (!attr.has_value()) return success();
-    SmallVector<int64_t> sparseShape(type->getShape());
-    if (static_cast<size_t>(attr->getDimension()) >= sparseShape.size()) {
-      return emitOptionalError(getLoc(), "sparsity dimension is incorrect");
-    }
-    if (attr->getN() != 2 || attr->getM() != 4) {
-      return emitOptionalError(getLoc(), "only 2:4 sparsity is supported");
-    }
-    sparseShape[attr->getDimension()] *= attr->getM() / attr->getN();
-    *type = type->clone(sparseShape);
-    return success();
-  };
-  if (failed(applySparsityDescriptor(getLhsSparsity(), &lhsType)) ||
-      failed(applySparsityDescriptor(getRhsSparsity(), &rhsType)))
-    return failure();
-
-  SmallVector<ShapedTypeComponents> inferredReturnShapes;
-  if (failed(hlo::inferDotGeneralOp(
-          getLoc(), lhsType, rhsType,
-          getDotDimensionNumbersAttr().getLhsBatchingDimensions(),
-          getDotDimensionNumbersAttr().getRhsBatchingDimensions(),
-          getDotDimensionNumbersAttr().getLhsContractingDimensions(),
-          getDotDimensionNumbersAttr().getRhsContractingDimensions(),
-          getPrecisionConfig(), inferredReturnShapes)))
-    return failure();
-
-  auto inferredShape = inferredReturnShapes[0];
-  auto resultType = cast<ShapedType>(getResult().getType());
-  if (inferredShape.hasRank() && resultType.hasRank() &&
-      failed(verifyCompatibleShape(inferredShape.getDims(),
-                                   resultType.getShape())))
-    return emitOptionalError(getLoc(), "inferred shape '",
-                             hlo::dimSizesToString(inferredShape.getDims()),
-                             "' is incompatible with return type of operation ",
-                             resultType);
   return success();
 }
 
@@ -3910,14 +3861,14 @@ void ReduceWindowOp::build(
   locs.reserve(numValues);
   for (auto i : inputs) {
     auto iType = cast<ShapedType>(i.getType());
-    blockArgTypes.push_back(iType.cloneWith(
-        llvm::ArrayRef<int64_t>(std::nullopt), iType.getElementType()));
+    blockArgTypes.push_back(
+        iType.cloneWith(llvm::ArrayRef<int64_t>(), iType.getElementType()));
     locs.push_back(i.getLoc());
   }
   for (auto i : init_values) {
     auto iType = cast<ShapedType>(i.getType());
-    blockArgTypes.push_back(iType.cloneWith(
-        llvm::ArrayRef<int64_t>(std::nullopt), iType.getElementType()));
+    blockArgTypes.push_back(
+        iType.cloneWith(llvm::ArrayRef<int64_t>(), iType.getElementType()));
     locs.push_back(i.getLoc());
   }
 
@@ -4491,6 +4442,9 @@ OpFoldResult SetDimensionSizeOp::fold(FoldAdaptor adaptor) {
   // dimension we're looking at. So the code below doesn't do anything.
   auto ty = dyn_cast<RankedTensorType>(getType());
   if (!ty) return {};
+
+  // If input is dynamic and output is not, we can't fold.
+  if (getOperand().getType() != getType()) return {};
 
   int64_t dimSize = ty.getDimSize(getDimension());
   if (dimSize == size.getSplatValue<IntegerAttr>().getInt())
@@ -5163,6 +5117,8 @@ UNARY_FOLDER_INT(NotOp, std::bit_not)
 UNARY_FOLDER_FLOAT(RoundNearestEvenOp, RoundNearestEven)
 UNARY_FOLDER_FLOAT(RoundOp, Round)
 
+UNARY_FOLDER_UPCAST_TO_F64(AcosOp, std::acos, AnyValue)
+UNARY_FOLDER_UPCAST_TO_F64(AcoshOp, std::acosh, AnyValue)
 UNARY_FOLDER_UPCAST_TO_F64(CosineOp, std::cos, AnyValue)
 UNARY_FOLDER_UPCAST_TO_F64(ErfOp, std::erf, AnyValue)
 UNARY_FOLDER_UPCAST_TO_F64(ExpOp, std::exp, AnyValue)
@@ -7678,7 +7634,7 @@ LogicalResult MhloDialect::verifyOperationAttribute(Operation* op,
              << "attribute " << attr.getName()
              << " can only be used on function-like operations";
   }
-  if (attr.getName() == "mhlo.cross_program_prefetches") {
+  if (attr.getName() == xla::kMhloCrossProgramPrefetches) {
     auto arrayAttr = dyn_cast<ArrayAttr>(attr.getValue());
     if (!arrayAttr)
       return op->emitOpError() << "cross_program_prefetches must be an array";
@@ -7695,7 +7651,7 @@ LogicalResult MhloDialect::verifyOperationAttribute(Operation* op,
       if (failed(res)) return res;
     }
   }
-  if (attr.getName() == "mhlo.spmd_parameters_sharding") {
+  if (attr.getName() == xla::kMhloSpmdParametersShardings) {
     auto arrayAttr = dyn_cast<ArrayAttr>(attr.getValue());
     if (!arrayAttr)
       return op->emitOpError() << "spmd_parameters_sharding: must be an array";

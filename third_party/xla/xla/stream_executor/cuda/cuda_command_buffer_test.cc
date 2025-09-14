@@ -28,6 +28,7 @@ limitations under the License.
 #include "third_party/cudnn_frontend/include/cudnn_frontend_utils.h"
 #include "xla/service/platform_util.h"
 #include "xla/stream_executor/command_buffer.h"
+#include "xla/stream_executor/cuda/cuda_compute_capability.h"
 #include "xla/stream_executor/cuda/cuda_dnn.h"
 #include "xla/stream_executor/device_memory.h"
 #include "xla/stream_executor/dnn.h"
@@ -66,6 +67,12 @@ TEST(CudaCommandBufferTest, CuDnnExplicitConstructionAndUpdateWork) {
     GTEST_SKIP() << "Requires cuDNN 9.7.0 or later.";
   }
 
+  if (!executor->GetDeviceDescription()
+           .cuda_compute_capability()
+           .IsAtLeastAmpere()) {
+    GTEST_SKIP() << "Requires at least an Ampere GPU.";
+  }
+
   constexpr int kDimSize = 32;
   constexpr int kTotalElements = kDimSize * kDimSize;
 
@@ -90,7 +97,7 @@ TEST(CudaCommandBufferTest, CuDnnExplicitConstructionAndUpdateWork) {
   TF_ASSERT_OK(graph.Prepare(dnn_support, NumericOptions{}));
   TF_ASSERT_OK(graph.Build(dnn_support, /*plan_id=*/std::nullopt));
   EXPECT_THAT(graph.SupportsExplicitCommandBufferConstruction(),
-              IsOkAndHolds(true));
+              absl_testing::IsOkAndHolds(true));
 
   DeviceMemory<int8_t> input = executor->AllocateArray<int8_t>(kTotalElements);
   TF_ASSERT_OK(stream->MemZero(&input, input.size()));

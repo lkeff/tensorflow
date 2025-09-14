@@ -332,13 +332,6 @@ absl::Status Env::HasAtomicMove(const string& path, bool* has_atomic_move) {
   return fs->HasAtomicMove(path, has_atomic_move);
 }
 
-absl::Status Env::CanCreateTempFile(const string& fname,
-                                    bool* can_create_temp_file) {
-  FileSystem* fs;
-  TF_RETURN_IF_ERROR(GetFileSystemForFile(fname, &fs));
-  return fs->CanCreateTempFile(fname, can_create_temp_file);
-}
-
 absl::Status Env::DeleteRecursively(const string& dirname,
                                     int64_t* undeleted_files,
                                     int64_t* undeleted_dirs) {
@@ -493,7 +486,7 @@ absl::Status ReadFileToString(Env* env, const string& fname, string* data) {
   data->resize(file_size);
   char* p = &*data->begin();
   absl::string_view result;
-  s = file->Read(0, file_size, &result, p);
+  s = file->Read(0, result, absl::MakeSpan(p, file_size));
   if (!s.ok()) {
     data->clear();
   } else if (result.size() != file_size) {
@@ -543,7 +536,8 @@ absl::Status FileSystemCopyFile(FileSystem* src_fs, const string& src,
   absl::Status s = absl::OkStatus();
   while (s.ok()) {
     absl::string_view result;
-    s = src_file->Read(offset, kCopyFileBufferSize, &result, scratch.get());
+    s = src_file->Read(offset, result,
+                       absl::MakeSpan(scratch.get(), kCopyFileBufferSize));
     if (!(s.ok() || s.code() == error::OUT_OF_RANGE)) {
       return s;
     }
@@ -569,7 +563,8 @@ class FileStream : public protobuf::io::ZeroCopyInputStream {
 
   bool Next(const void** data, int* size) override {
     absl::string_view result;
-    absl::Status s = file_->Read(pos_, kBufSize, &result, scratch_);
+    absl::Status s =
+        file_->Read(pos_, result, absl::MakeSpan(scratch_, kBufSize));
     if (result.empty()) {
       status_ = s;
       return false;

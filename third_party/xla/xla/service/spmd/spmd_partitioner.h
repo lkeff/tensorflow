@@ -42,6 +42,7 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/hlo/ir/hlo_sharding.h"
 #include "xla/hlo/pass/hlo_pass_interface.h"
+#include "xla/hlo/utils/hlo_sharding_util.h"
 #include "xla/literal.h"
 #include "xla/service/call_graph.h"
 #include "xla/service/custom_call_sharding_helper.h"
@@ -110,6 +111,10 @@ struct SpmdPartitionerOptions {
   // operand as an already rewritten windowed einsum loop.
   bool disable_ag_rewrite_for_multiple_consumers = false;
 
+  // Enables partially windowed einsums with more than one sharded operand
+  // dimension as seen in simultaneous data and tensor parallelism.
+  bool partial_windowed_einsum = false;
+
   // Partitioning method to prioritize for gather operations.
   std::vector<GatherScatterPartitioningMethod>
       preferred_gather_partition_methods = {
@@ -126,6 +131,9 @@ struct SpmdPartitionerOptions {
   // This combines sizes in bytes of both operands.
   // When it's set, it will override threshold_for_windowed_einsum_mib.
   std::optional<int64_t> total_bytes_windowed_einsum_threshold = std::nullopt;
+
+  // The maximum number of iterations for windowed einsum.
+  int64_t max_windowed_einsum_iteration = 32;
 };
 
 // Class to wrap the computation builder to capture information during SPMD
@@ -180,7 +188,7 @@ class SpmdBuilder : public HloComputation::Builder {
 
   // Map from the currently visiting (old) instruction to new instructions
   // created during SPMD partitioning.
-  HloInstructionMap<std::vector<HloInstruction*>> instructions_;
+  HloInstructionMapInternal<std::vector<HloInstruction*>> instructions_;
 
   // Maps from each created instruction to a set of dimensions that are from
   // broadcasts or elementwise ops over broadcasts. This means elements along
@@ -391,6 +399,12 @@ class SpmdPartitioner : public HloModulePass {
       HloModule* module,
       const absl::flat_hash_set<absl::string_view>& execution_threads);
 
+  // Replaces unreduced sharding type with replicated type to decouple unreduced
+  // with other sharding types.
+  absl::Status ConvertUnreducedSharding(
+      HloModule* module,
+      const absl::flat_hash_set<absl::string_view>& execution_threads);
+
   // Returns if the given side-effecting instruction is allowed to have
   // replicated sharding.
   virtual bool CanSideEffectingHaveReplicatedSharding(
@@ -409,6 +423,13 @@ class SpmdPartitioner : public HloModulePass {
   // pad->slice into a single pad with potentially negative padding to avoid
   // multiple halo exchanges.
   absl::Status PreprocessHlos(
+      HloModule* module,
+      const absl::flat_hash_set<absl::string_view>& execution_threads);
+
+  // Preprocesses the graph to make sure that computations called in
+  // control-flow contexts (call, while, conditional) have matching sharding
+  // annotations on callee parameters and the caller arguments.
+  absl::StatusOr<bool> PreprocessCallSites(
       HloModule* module,
       const absl::flat_hash_set<absl::string_view>& execution_threads);
 
@@ -468,9 +489,13 @@ class PartitionedHlo {
   };
   PartitionedHlo(HloInstruction* hlo, Shape base_shape, PartitioningState state)
       : hlo_(hlo), base_shape_(base_shape), state_(std::move(state)) {
-    CHECK(hlo->has_sharding())
-        << "PartitionedHlo is missing sharding:" << hlo->ToString();
   }
+
+  PartitionedHlo(PartitionedHlo&& other) = default;
+  PartitionedHlo(const PartitionedHlo& other) = default;
+
+  PartitionedHlo& operator=(PartitionedHlo&& other) = default;
+  PartitionedHlo& operator=(const PartitionedHlo& other) = default;
 
   PartitionedHlo CloneWithNewHlo(HloInstruction* hlo) const {
     PartitionedHlo new_phlo = *this;
@@ -518,11 +543,14 @@ class PartitionedHlo {
   // Returns the sharding of the SPMD instruction.
   const HloSharding& sharding() const { return hlo_->sharding(); }
 
-  // Returns the SPMD instruction's number of dimensions.
-  int64_t num_dimensions() const { return base_shape_.dimensions().size(); }
+  void set_sharding(const HloSharding& sharding) {
+    hlo_->set_sharding(sharding);
+  }
 
-  // Original full shape of the data.
-  const Shape& base_shape() const { return base_shape_; }
+  // Returns the rank of the SPMD instruction.
+  const int64_t num_dimensions() const {
+    return base_shape_.dimensions().size();
+  }
 
   int64_t NewChannel() const { return (*state_.next_channel_id)++; }
 
@@ -533,8 +561,6 @@ class PartitionedHlo {
       HloInstruction* pad_value, bool mask_invalid_region = true,
       bool force_mask_in_compact = false);
 
-  const PartitioningState& state() const { return state_; }
-
   void AddReshardCache(const HloSharding& sharding, const PartitionedHlo& phlo);
 
   // Helper function to replicate the data on all devices. Could only modify
@@ -544,7 +570,10 @@ class PartitionedHlo {
   // Helper function to replicate the data for partitions along the given dims.
   HloInstruction* ReplicatePartial(absl::Span<const int64_t> dims) const;
 
-  // Set state of the partitoned HLO.
+  const Shape& base_shape() const { return base_shape_; }
+  void set_base_shape(const Shape& base_shape) { base_shape_ = base_shape; }
+
+  const PartitioningState& state() const { return state_; }
   void set_state(PartitioningState state) { state_ = std::move(state); }
 
  private:
@@ -597,6 +626,87 @@ class PartitionedHlo {
   Shape base_shape_;
 
   PartitioningState state_;
+};
+
+// Combines two identically sharded PartitionedHlo instructions describing the
+// operand and scale tensors in OCP microscaling (MX) formats used in
+// block-scaled dots. See
+// https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf.
+class PartitionedHloMX {
+ public:
+  class ShapesMX {
+   public:
+    ShapesMX(const Shape& operand_shape, const Shape& scale_shape)
+        : shapes_(operand_shape, scale_shape) {};
+
+    absl::Span<const int64_t> dimensions() const {
+      return shapes_.first.dimensions();
+    }
+
+    operator Shape() const { return shapes_.first; }
+
+    operator std::pair<Shape, Shape>() const { return shapes_; }
+
+   private:
+    std::pair<Shape, Shape> shapes_;
+  };
+
+  PartitionedHloMX(const PartitionedHlo& operand, const PartitionedHlo& scale)
+      : operand_(operand.hlo(), operand.base_shape(), operand.state()),
+        scale_(scale.hlo(), scale.base_shape(), scale.state()) {
+    CHECK_EQ(operand.sharding(), scale.sharding())
+        << "Operand and scale must be identically sharded.";
+  };
+
+  PartitionedHlo operand() const { return operand_; }
+
+  PartitionedHlo scale() const { return scale_; }
+
+  const HloSharding& sharding() const { return operand_.sharding(); }
+
+  void set_sharding(const HloSharding& sharding) {
+    operand_.set_sharding(sharding);
+    scale_.set_sharding(sharding);
+  }
+
+  const ShapesMX base_shape() const {
+    return ShapesMX(operand_.base_shape(), scale_.base_shape());
+  }
+
+  const PartitionedHlo::PartitioningState& state() const {
+    return operand_.state();
+  }
+
+  // Returns the operand instruction.
+  HloInstruction* hlo() const { return operand_.hlo(); }
+
+  PartitionedHloMX Replicate() const {
+    return PartitionedHloMX(operand_.Replicate(), scale_.Replicate());
+  }
+
+  PartitionedHloMX Reshard(const HloSharding& target) const {
+    return PartitionedHloMX(operand_.Reshard(target), scale_.Reshard(target));
+  }
+
+  PartitionedHloMX PadWithZero(
+      absl::Span<const int64_t> left_padded_dims = {},
+      absl::Span<const int64_t> skipped_dims = {}) const {
+    return PartitionedHloMX(
+        operand_.PadWithZero(left_padded_dims, skipped_dims),
+        scale_.PadWithZero(left_padded_dims, skipped_dims));
+  }
+
+  PartitionedHloMX PadWithZeroOnSpecifiedDims(
+      absl::Span<const int64_t> dims,
+      absl::Span<const int64_t> left_padded_dims = {}) const {
+    return PartitionedHloMX(
+        operand_.PadWithZeroOnSpecifiedDims(dims, left_padded_dims),
+        scale_.PadWithZeroOnSpecifiedDims(dims, left_padded_dims));
+  }
+
+ private:
+  PartitionedHlo operand_;
+  PartitionedHlo scale_;
 };
 
 class SpmdPartitioningVisitor : public DfsHloVisitorWithDefault {
@@ -652,13 +762,11 @@ class SpmdPartitioningVisitor : public DfsHloVisitorWithDefault {
   absl::Status HandleWhile(HloInstruction* hlo) override;
 
   // Implementation of dot partitioning given DotGeneralDimsMapping.
+  template <typename CreateShardedFunctor>
   absl::Status HandleDotHelper(
       HloInstruction* hlo,
       const dot_as_convolution_util::DotConvolutionDimsInfo& dims_mapping,
-      absl::FunctionRef<absl::StatusOr<HloInstruction*>(
-          HloInstruction*, HloInstruction*, SpmdBuilder*,
-          const Window& conv_window)>
-          create_sharded_dot);
+      CreateShardedFunctor& create_sharded_dot);
 
   // Common handle for elementwise HLOs.
   absl::Status HandleElementwise(HloInstruction* hlo);
@@ -686,11 +794,7 @@ class SpmdPartitioningVisitor : public DfsHloVisitorWithDefault {
 
   // Sets the PartitionedHlo for the original hlo.
   void SetPartitionedHlo(const HloInstruction* hlo,
-                         const PartitionedHlo& partitioned_hlo) {
-    CHECK_EQ(partitioned_instructions_.count(hlo), 0);
-    partitioned_instructions_.emplace(hlo, partitioned_hlo);
-    changed_ = true;
-  }
+                         PartitionedHlo&& partitioned_hlo);
 
   // Convenient wrapper that creates PartitionedHlo from the result of the func
   // and maps it to the given original hlo.
@@ -718,17 +822,20 @@ class SpmdPartitioningVisitor : public DfsHloVisitorWithDefault {
   }
 
   virtual double GetCommunicationTimeInMilliSec(
-      int64_t bytes, absl::Span<const ReplicaGroup> device_groups) {
+      int64_t bytes, const CollectiveDeviceList& collective_device_list) {
     return 0.0;
   }
 
   virtual int GetCommunicationMultiplier(
-      absl::Span<const ReplicaGroup> device_groups) {
+      const CollectiveDeviceList& collective_device_list) {
     return 1;
   }
 
   std::vector<ReplicaGroup> CreateReplicaGroups(
       std::vector<std::vector<int64_t>>& groups);
+
+  std::vector<ReplicaGroup> CreateReplicaGroups(
+      const hlo_sharding_util::DeviceGroupTileAssignment& groups);
 
   const CallGraph& call_graph() { return call_graph_; }
   int64_t num_partitions() const { return num_partitions_; }
@@ -803,7 +910,7 @@ class SpmdPartitioningVisitor : public DfsHloVisitorWithDefault {
   std::optional<SPMDCollectiveOpsCreator> visiting_collective_ops_creator_;
   std::optional<HloInstruction*> visiting_partition_id_;
   std::vector<PartitionedHlo::PartitioningState> visiting_state_;
-  std::vector<std::vector<int64_t>> device_groups_;
+  std::optional<hlo_sharding_util::DeviceGroupTileAssignment> device_groups_;
   const CallGraph& call_graph_;
 };
 

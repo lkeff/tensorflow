@@ -37,7 +37,6 @@ limitations under the License.
 #include "xla/service/algorithm_util.h"
 #include "xla/service/gpu/backend_configs.pb.h"
 #include "xla/service/gpu/ir_emission_utils.h"
-#include "xla/service/gpu/matmul_indexing_utils.h"
 #include "xla/shape_util.h"
 #include "xla/stream_executor/cuda/cuda_compute_capability.h"
 #include "xla/stream_executor/device_description.h"
@@ -106,11 +105,12 @@ absl::flat_hash_set<HloOpcode> TritonSupportedUnaryElementwiseOps(
       element_type == PrimitiveType::F32 ||
       element_type == PrimitiveType::F64) {
     absl::flat_hash_set<HloOpcode> additional_opcodes{
-        HloOpcode::kCos,   HloOpcode::kExp,   HloOpcode::kExpm1,
-        HloOpcode::kFloor, HloOpcode::kCeil,  HloOpcode::kLog,
-        HloOpcode::kLog1p, HloOpcode::kRsqrt, HloOpcode::kSin,
-        HloOpcode::kSqrt,  HloOpcode::kCbrt,  HloOpcode::kTan,
-        HloOpcode::kTanh,  HloOpcode::kErf};
+        HloOpcode::kCos,   HloOpcode::kFloor, HloOpcode::kLog1p,
+        HloOpcode::kSqrt,  HloOpcode::kTanh,  HloOpcode::kAcos,
+        HloOpcode::kAcosh, HloOpcode::kExp,   HloOpcode::kExpm1,
+        HloOpcode::kCbrt,  HloOpcode::kErf,   HloOpcode::kLog,
+        HloOpcode::kTan,   HloOpcode::kCeil,  HloOpcode::kRsqrt,
+        HloOpcode::kSin};
     ret.insert(additional_opcodes.begin(), additional_opcodes.end());
   }
 
@@ -151,7 +151,8 @@ CodegenDecision IsTritonSupportedConversion(
     return error_message();
   }
 
-  if (input == S4 && output != S8) {
+  if (input == S4 && output != S8 && output != F16 && output != BF16 &&
+      output != F32 && output != F64) {
     return error_message();
   }
   if (output == S4) {
@@ -399,12 +400,20 @@ CodegenDecision AreDotAlgorithmInputAndOutputConversionsSupported(
     }
   }
 
-  if (allowed_operands_types_or->size() != 1 &&
-      (lhs_type != rhs_type ||
-       !absl::c_linear_search(*allowed_operands_types_or, lhs_type))) {
+  if (algorithm == PrecisionConfig::ALG_DOT_F64_F64_F64 &&
+      primitive_util::BitWidth(lhs_type) < 32 &&
+      !std::get<se::CudaComputeCapability>(gpu_version).IsAtLeastBlackwell()) {
+    return forbid("Unsupported BF16 on GPUs before Blackwell");
+  }
+
+  if (allowed_operands_types_or->size() != 1) {
+    if (lhs_type == rhs_type &&
+        absl::c_linear_search(*allowed_operands_types_or, lhs_type)) {
+      // No conversion necessary.
+      return CodegenDecision::Allow();
+    }
+    // We may need to handle that in the future.
     return forbid("Unsupported operand types");
-  } else if (allowed_operands_types_or->size() == 1) {
-    return CodegenDecision::Allow();
   }
 
   PrimitiveType expected_operands_type = allowed_operands_types_or->front();
@@ -488,8 +497,9 @@ CodegenDecision IsTritonSupportedDot(
 // - of kind `__triton_nested_gemm_fusion`;
 // - to have a single user that is either a `dot` or a `concatenate`;
 // - calls a supported computation.
-CodegenDecision IsSupportedFusion(const HloFusionInstruction& hlo,
-                                  const se::GpuComputeCapability& capability) {
+CodegenDecision IsTritonSupportedFusion(
+    const HloFusionInstruction& hlo,
+    const se::GpuComputeCapability& capability) {
   // TODO(b/393299275): test cases when there are multiple dot users of the
   // same fusion.
   if (hlo.user_count() != 1) {
@@ -583,6 +593,25 @@ CodegenDecision IsTritonSupportedInstructionImpl(
     return IsTritonSupportedConcatenate(instr);
   }
 
+  // Special handling for the kPad instruction. Right now we only support "high"
+  // padding. "Interior" and "low" padding are not supported.
+  if (instr.opcode() == HloOpcode::kPad) {
+    auto pad = Cast<HloPadInstruction>(&instr);
+    bool no_op = true;
+    for (const auto& dim_config : pad->padding_config().dimensions()) {
+      if (dim_config.edge_padding_low() != 0 ||
+          dim_config.interior_padding() != 0) {
+        return CodegenDecision::Forbid("Only high padding is supported.");
+      }
+      no_op = no_op && dim_config.edge_padding_high() == 0;
+    }
+    if (no_op) {
+      return CodegenDecision::Forbid("No-op pad ops are not allowed.");
+    }
+    return CodegenDecision(pad->shape().element_type() != S4,
+                           "S4 is not supported.");
+  }
+
   // Const is technically an elementwise op, so this check must be before the
   // elementwise check.
   if (instr.opcode() == HloOpcode::kConstant) {
@@ -607,9 +636,22 @@ CodegenDecision IsTritonSupportedInstructionImpl(
       return CanTritonHandleReduce(*Cast<HloReduceInstruction>(&instr),
                                    gpu_version);
     }
-    case HloOpcode::kBitcast:
-    case HloOpcode::kBroadcast:
     case HloOpcode::kParameter:
+      return CodegenDecision::Allow();
+    case HloOpcode::kDynamicSlice:
+      // TODO(b/417172838): enable this once we confirm that no benchmarks were
+      // regressed.
+      return CodegenDecision::Forbid(
+          "dynamic slice is supported but not enabled yet");
+    case HloOpcode::kBitcast:
+      if (ShapeUtil::ElementsIn(instr.operand(0)->shape()) !=
+          ShapeUtil::ElementsIn(instr.shape())) {
+        return CodegenDecision::Forbid(
+            "only bitcasts with the same number of elements are supported");
+      }
+      return CodegenDecision(instr.shape().element_type() != S4,
+                             "S4 is not supported.");
+    case HloOpcode::kBroadcast:
     case HloOpcode::kReshape:
     case HloOpcode::kSlice:
     case HloOpcode::kTranspose:
@@ -619,8 +661,8 @@ CodegenDecision IsTritonSupportedInstructionImpl(
       return IsTritonSupportedDot(*Cast<HloDotInstruction>(&instr),
                                   gpu_version);
     case HloOpcode::kFusion:
-      return IsSupportedFusion(*Cast<HloFusionInstruction>(&instr),
-                               gpu_version);
+      return IsTritonSupportedFusion(*Cast<HloFusionInstruction>(&instr),
+                                     gpu_version);
     default:
       // Not all instructions have a special handling.
       break;
@@ -647,24 +689,16 @@ CodegenDecision IsTritonSupportedInstructionImpl(
 namespace internal {
 bool IsTritonUnsupportedOpcode(HloOpcode opcode) {
   switch (opcode) {
-    case HloOpcode::kConvolution:
     case HloOpcode::kDynamicReshape:
     case HloOpcode::kDynamicSlice:
     case HloOpcode::kDynamicUpdateSlice:
     case HloOpcode::kGather:
-    case HloOpcode::kPad:
     case HloOpcode::kRaggedDot:
-    case HloOpcode::kRecv:
-    case HloOpcode::kRecvDone:
     case HloOpcode::kReduceWindow:
+    case HloOpcode::kScaledDot:
     case HloOpcode::kScatter:
     case HloOpcode::kSelectAndScatter:
-    case HloOpcode::kSend:
-    case HloOpcode::kSendDone:
     case HloOpcode::kSetDimensionSize:
-    case HloOpcode::kSort:
-    case HloOpcode::kTopK:
-    case HloOpcode::kTriangularSolve:
       return true;
     default:
       return false;

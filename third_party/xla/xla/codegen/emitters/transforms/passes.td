@@ -18,6 +18,19 @@ limitations under the License.
 
 include "mlir/Pass/PassBase.td"
 
+def LowerXlaIntrinsicLibPass : Pass<"xla-lower-xla-intrinsic-lib", "mlir::ModuleOp"> {
+  let summary = "Lowers XLA math function calls to xla.* intrinsic lib calls.";
+  let description = [{
+    Lowers XLA math function calls to xla.* intrinsic lib calls. This enables LLVM to
+    vectorize, inline, and optimize over LLVM IR implementations of these
+    functions and their approximations.
+  }];
+  let dependentDialects = [
+    "mlir::func::FuncDialect",
+  ];
+  let constructor = "CreateLowerXlaIntrinsicLibPass()";
+}
+
 def ConvertPureCallOpsPass
     : Pass<"xla-convert-pure-call-ops", "mlir::func::FuncOp"> {
   let summary = "Converts xla.pure_call to func.call";
@@ -77,6 +90,11 @@ def ExpandFloatOpsPass : Pass<"xla-expand-float-ops", "mlir::ModuleOp"> {
   let dependentDialects = [
     "mlir::arith::ArithDialect", "mlir::math::MathDialect",
     "mlir::mhlo::MhloDialect"
+  ];
+
+  let options = [
+    Option<"approximate_tanh_", "approximate_tanh", "bool", /*default=*/"true",
+           "Use built-in MLIR approximation for tanh.">,
   ];
 
   let constructor = "CreateExpandFloatOpsPass()";
@@ -231,6 +249,11 @@ def SimplifyArithPass : Pass<"xla-simplify-arith", "mlir::func::FuncOp"> {
   let dependentDialects = [
     "mlir::arith::ArithDialect",
     "mlir::func::FuncDialect",
+  ];
+
+  let options = [
+    Option<"fast_min_max_", "fast_min_max", "bool", /*default=*/"false",
+           "Use fast min/max (does not propagate nan).">,
   ];
 
   let constructor = "CreateSimplifyArithPass()";

@@ -28,6 +28,7 @@ limitations under the License.
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/inlined_vector.h"
 #include "absl/functional/any_invocable.h"
+#include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -72,8 +73,7 @@ PJRT_ClientDeleter MakeClientDeleter(const PJRT_Api* api) {
     destroy_args.extension_start = nullptr;
     destroy_args.client = client;
 
-    PJRT_Error* error = api->PJRT_Client_Destroy(&destroy_args);
-    CHECK(error == nullptr);
+    pjrt::LogFatalIfPjrtError(api->PJRT_Client_Destroy(&destroy_args), api);
   };
 }
 
@@ -467,14 +467,15 @@ xla::PjRtFuture<> ConvertCEventToCppFuture(PJRT_Event* c_event,
   event_onready_args.extension_start = nullptr;
   event_onready_args.event = c_event;
 
-  PjRtFuture<>::Promise promise = PjRtFuture<>::CreatePromise();
+  auto [promise, future] = PjRtFuture<>::MakePromise();
   event_onready_args.user_arg = new std::function<void(PJRT_Error*)>(
-      [promise, c_event, c_api](PJRT_Error* error) mutable {
+      [promise = std::make_shared<PjRtFuture<>::Promise>(std::move(promise)),
+       c_event, c_api](PJRT_Error* error) mutable {
         if (error != nullptr) {
-          promise.Set(::pjrt::PjrtErrorToStatus(error, c_api));
+          promise->Set(::pjrt::PjrtErrorToStatus(error, c_api));
           ::pjrt::MakeErrorDeleter(c_api)(error);
         } else {
-          promise.Set();
+          promise->Set();
         }
         ::pjrt::MakeEventDeleter(c_api)(c_event);
       });
@@ -489,7 +490,7 @@ xla::PjRtFuture<> ConvertCEventToCppFuture(PJRT_Event* c_event,
   if (error != nullptr) {
     return PjRtFuture<>(::pjrt::PjrtErrorToStatus(error, c_api));
   }
-  return PjRtFuture<>(std::move(promise));
+  return std::move(future);
 }
 
 static absl::StatusOr<PJRT_NamedValue> ConvertToPjRtNamedValue(
@@ -1096,6 +1097,7 @@ absl::StatusOr<xla::CompiledMemoryStats> GetCompiledMemoryStats(
   args.struct_size = PJRT_Executable_GetCompiledMemoryStats_Args_STRUCT_SIZE;
   args.extension_start = nullptr;
   args.executable = executable;
+  args.peak_memory_in_bytes = 0;
   RETURN_STATUS_IF_PJRT_ERROR(
       api->PJRT_Executable_GetCompiledMemoryStats(&args), api);
   xla::CompiledMemoryStats results;
@@ -1110,6 +1112,7 @@ absl::StatusOr<xla::CompiledMemoryStats> GetCompiledMemoryStats(
   results.host_output_size_in_bytes = args.host_output_size_in_bytes;
   results.host_alias_size_in_bytes = args.host_alias_size_in_bytes;
   results.host_temp_size_in_bytes = args.host_temp_size_in_bytes;
+  results.peak_memory_in_bytes = args.peak_memory_in_bytes;
   return results;
 }
 

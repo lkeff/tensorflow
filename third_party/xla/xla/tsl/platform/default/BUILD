@@ -3,15 +3,23 @@ load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
 load("@local_config_rocm//rocm:build_defs.bzl", "if_rocm_is_configured")
 load(
     "//xla/tsl:tsl.bzl",
-    "if_cuda_tools",
     "if_not_fuchsia",
     "if_not_windows",
     "if_oss",
     "internal_visibility",
     "tsl_copts",
 )
-load("//xla/tsl:tsl.default.bzl", "filegroup", "tsl_grpc_cc_dependencies")
+load(
+    "//xla/tsl:tsl.default.bzl",
+    "filegroup",
+    "if_cuda_tools",
+    "tsl_grpc_cc_dependencies",
+)
 load("//xla/tsl/platform:rules_cc.bzl", "cc_library")
+load(
+    "//xla/tsl/platform/default:cuda_build_defs.bzl",
+    "if_cuda_newer_than",
+)
 
 package(
     # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
@@ -66,9 +74,11 @@ cc_library(
     srcs = ["cuda_root_path.cc"],
     hdrs = ["@local_tsl//tsl/platform:cuda_root_path.h"],
     compatible_with = [],
-    data = if_cuda_tools([
-        "@cuda_nvcc//:nvvm",
-    ]),
+    data = if_cuda_tools(if_cuda_newer_than(
+        "13_0",
+        if_false = ["@cuda_nvcc//:nvvm"],
+        if_true = ["@cuda_nvvm//:nvvm"],
+    )),
     tags = [
         "manual",
         "no_oss",
@@ -78,6 +88,7 @@ cc_library(
         "//xla/tsl/platform:env",
         "//xla/tsl/platform:logging",
         "//xla/tsl/platform:types",
+        "@com_google_absl//absl/strings",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_tsl//tsl/platform",
         "@local_tsl//tsl/platform:path",
@@ -279,30 +290,6 @@ cc_library(
     ] + if_rocm_is_configured([
         "@local_config_rocm//rocm:rocm_rpath",
     ]),
-)
-
-cc_library(
-    name = "logging",
-    srcs = ["logging.cc"],
-    hdrs = ["//xla/tsl/platform:logging.h"],
-    tags = [
-        "manual",
-        "no_oss",
-        "nobuilder",
-    ],
-    textual_hdrs = ["logging.h"],
-    deps = [
-        "//xla/tsl/platform:env_time",
-        "//xla/tsl/platform:macros",
-        "//xla/tsl/platform:types",
-        "@com_google_absl//absl/base",
-        "@com_google_absl//absl/base:core_headers",
-        "@com_google_absl//absl/base:log_severity",
-        "@com_google_absl//absl/container:flat_hash_map",
-        "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/synchronization",
-        "@local_tsl//tsl/platform",
-    ],
 )
 
 filegroup(
@@ -576,6 +563,7 @@ bzl_library(
     # This .bzl file is only used in OSS and references OSS paths. Therefore it cannot be parsed
     # correctly by the parse test in g3.
     # copybara:uncomment parse_tests = False,
+    # copybara:uncomment deps = ["@rules_cc//cc:core_rules"],
 )
 
 bzl_library(
@@ -594,6 +582,7 @@ bzl_library(
     # copybara:uncomment parse_tests = False,
     deps = [
         ":build_config_root_bzl",
+        # copybara:uncomment "@rules_cc//cc:core_rules",
         "//xla/tsl:tsl_bzl",
         "@local_xla//third_party/py/rules_pywrap:pywrap_bzl",
     ],
@@ -648,7 +637,6 @@ exports_files(
         ["*"],
         exclude = [
             "integral_types.h",
-            "logging.h",
             "test.cc",
         ],
     ),
@@ -658,7 +646,6 @@ exports_files(
 exports_files(
     srcs = [
         "integral_types.h",
-        "logging.h",
         "test.cc",
     ],
     visibility = internal_visibility([
@@ -667,4 +654,18 @@ exports_files(
         "//tensorflow/core/lib/jpeg:__pkg__",
         "//tensorflow/core/platform:__pkg__",
     ]),
+)
+
+cc_library(
+    name = "recordphase",
+    srcs = ["recordphase.cc"],
+    hdrs = ["//xla/tsl/platform:recordphase.h"],
+    tags = [
+        "manual",
+        "no_oss",
+        "nobuilder",
+    ],
+    deps = [
+        "@com_google_absl//absl/strings:string_view",
+    ],
 )

@@ -15,10 +15,43 @@ limitations under the License.
 
 #include "xla/python/ifrt/user_context.h"
 
+#include <utility>
+
+#include "absl/base/attributes.h"
+#include "absl/base/no_destructor.h"
+#include "absl/base/nullability.h"
+#include "absl/log/check.h"
+
 namespace xla {
 namespace ifrt {
 
-char UserContext::ID = 0;         // For llvm::RTTI
+char UserContext::ID = 0;  // For llvm::RTTI
+
+namespace {
+
+const auto kNullContext = absl::NoDestructor<UserContextRef>(UserContextRef());
+
+ABSL_CONST_INIT thread_local
+    absl_nullable const UserContextRef* current_context = nullptr;
+
+}  // namespace
+
+UserContextScope::UserContextScope(absl_nullable UserContextRef context)
+    : outer_context_(current_context), context_(std::move(context)) {
+  current_context = &context_;
+}
+
+UserContextScope::~UserContextScope() {
+  CHECK(current_context == &context_);
+  current_context = outer_context_;
+}
+
+absl_nullable const UserContextRef& UserContextScope::current() {
+  if (current_context == nullptr) {
+    return *kNullContext;
+  }
+  return *current_context;
+}
 
 }  // namespace ifrt
 }  // namespace xla

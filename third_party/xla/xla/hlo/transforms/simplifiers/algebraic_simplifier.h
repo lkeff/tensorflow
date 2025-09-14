@@ -46,6 +46,10 @@ limitations under the License.
 
 namespace xla {
 
+// The maximum number of times to run the algebraic simplifier to reach a fixed
+// point.
+static constexpr int64_t kAlgSimpRerunLimit = 50;
+
 class AlgebraicSimplifierOptions {
  public:
   // Platform dependent callback to determine if a reshape `from_shape` to
@@ -347,6 +351,18 @@ class AlgebraicSimplifierOptions {
     rewrite_reshape_transpose_as_slice_concatenate_ = value;
   }
 
+  bool run_to_fixed_point() const { return run_to_fixed_point_; }
+
+  void set_run_to_fixed_point(bool value) { run_to_fixed_point_ = value; }
+
+  bool rewrite_no_op_bitcast_convert_to_bitcast() const {
+    return rewrite_no_op_bitcast_convert_to_bitcast_;
+  }
+
+  void set_rewrite_no_op_bitcast_convert_to_bitcast(bool value) {
+    rewrite_no_op_bitcast_convert_to_bitcast_ = value;
+  }
+
  private:
   // Metadata struct can be used to store any metadata information encapsulated
   // with the AlgebraicSimplifierOptions that can be later used in an
@@ -390,19 +406,10 @@ class AlgebraicSimplifierOptions {
   bool enable_fast_math_{false};
   bool enable_broadcast_degenerate_dimension_{true};
   bool enable_remove_no_op_reduce_precision_{false};
-  bool enable_onednn_support_{
-#ifdef INTEL_MKL
-      // Deprecation warning: This config-dependent default value is a temporary
-      // measure to preserve existing behavior until downstream users can update
-      // their code. The option will default to `false` in a future version;
-      // please explicitly call `set_enable_onednn_support(true)` if you depend
-      // on it being `true`.
-      true
-#else   // INTEL_MKL
-      false
-#endif  // INTEL_MKL
-  };
+  bool enable_onednn_support_{false};
   bool rewrite_reshape_transpose_as_slice_concatenate_{true};
+  bool run_to_fixed_point_{true};
+  bool rewrite_no_op_bitcast_convert_to_bitcast_{false};
   Metadata metadata_;
 };
 

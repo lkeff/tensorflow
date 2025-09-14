@@ -30,6 +30,7 @@ limitations under the License.
 #include "xla/stream_executor/dnn.h"
 #include "xla/stream_executor/kernel.h"
 #include "xla/stream_executor/launch_dim.h"
+#include "xla/stream_executor/platform.h"
 
 namespace stream_executor {
 
@@ -139,11 +140,16 @@ class CommandBuffer {
   // Command buffer API
   //===--------------------------------------------------------------------===//
 
+  // Creates an empty command.
+  virtual absl::StatusOr<const Command*> CreateEmptyCmd(
+      absl::Span<const Command* const> dependencies,
+      StreamPriority priority = StreamPriority::Default) = 0;
+
   // Creates a kernel launch command.
   virtual absl::StatusOr<const Command*> CreateLaunch(
       const ThreadDim& threads, const BlockDim& blocks, const Kernel& kernel,
-      const KernelArgs& args,
-      absl::Span<const Command* const> dependencies) = 0;
+      const KernelArgs& args, absl::Span<const Command* const> dependencies,
+      StreamPriority priority = StreamPriority::Default) = 0;
 
   // Updates a kernel launch command.
   virtual absl::Status UpdateLaunch(const Command* command,
@@ -168,14 +174,17 @@ class CommandBuffer {
                             const ThreadDim& threads, const BlockDim& blocks,
                             Args... args);
 
-  // Creates a command that launches a nested command buffer.
-  virtual absl::StatusOr<const Command*> CreateNestedCommand(
-      const CommandBuffer& nested,
+  // kCloned: child command is cloned into parent command.
+  // kMoved: child command is moved into parent command.
+  enum class ChildCommandType { kCloned, kMoved };
+  virtual absl::StatusOr<const Command*> CreateChildCommand(
+      ChildCommandType type, CommandBuffer& nested,
       absl::Span<const Command* const> dependencies) = 0;
 
   // Updates a command that launches a nested command buffer.
-  virtual absl::Status UpdateNestedCommand(const Command* command,
-                                           const CommandBuffer& nested) = 0;
+  virtual absl::Status UpdateChildCommand(ChildCommandType type,
+                                          const Command* command,
+                                          const CommandBuffer& nested) = 0;
 
   // Creates a device-to-device memory copy.
   virtual absl::StatusOr<const Command*> CreateMemcpyD2D(
@@ -263,6 +272,9 @@ class CommandBuffer {
                                    DeviceMemory<bool> pred,
                                    UpdateCommands update_cond,
                                    UpdateCommands update_body) = 0;
+
+  // Set the priority of all nodes in the command buffer.
+  virtual absl::Status SetPriority(StreamPriority priority) = 0;
 
   // Submits the command buffer for execution.
   virtual absl::Status Submit(Stream* stream) {

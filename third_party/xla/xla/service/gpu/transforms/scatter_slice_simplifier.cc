@@ -36,9 +36,9 @@ limitations under the License.
 #include "xla/service/hlo_creation_utils.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
+#include "xla/tsl/platform/errors.h"
+#include "xla/tsl/platform/statusor.h"
 #include "xla/util.h"
-#include "tsl/platform/errors.h"
-#include "tsl/platform/statusor.h"
 
 namespace xla {
 namespace {
@@ -76,7 +76,12 @@ class ScatterSliceMatcher {
                         return ShapeUtil::MakeShape(op->shape().element_type(),
                                                     result_dimensions_);
                       });
-    return ShapeUtil::MakeMaybeTupleShape(result_shapes);
+    auto maybe_tuple_shape =
+        ShapeUtil::MakeValidatedMaybeTupleShape(result_shapes);
+    if (!maybe_tuple_shape.ok()) {
+      return std::nullopt;
+    }
+    return *maybe_tuple_shape;
   }
 
  private:

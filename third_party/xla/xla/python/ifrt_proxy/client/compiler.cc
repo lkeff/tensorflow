@@ -25,10 +25,12 @@
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "llvm/Support/Casting.h"
+#include "xla/debug_options_flags.h"
 #include "xla/pjrt/host_callback.h"
 #include "xla/python/ifrt/client.h"
 #include "xla/python/ifrt/compiler.h"
 #include "xla/python/ifrt/device.h"
+#include "xla/python/ifrt/device_list.h"
 #include "xla/python/ifrt/executable.h"
 #include "xla/python/ifrt/future.h"
 #include "xla/python/ifrt/host_callback.h"
@@ -38,12 +40,14 @@
 #include "xla/python/ifrt_proxy/client/executable.h"
 #include "xla/python/ifrt_proxy/client/rpc_helper.h"
 #include "xla/python/ifrt_proxy/common/ifrt_service.pb.h"
+#include "xla/python/ifrt_proxy/common/versions.h"
 #include "xla/python/ifrt_proxy/server/host_callback.h"
 #include "xla/python/pjrt_ifrt/pjrt_host_callback.h"
 #include "xla/python/pjrt_ifrt/xla_compiler.h"
 #include "xla/tsl/concurrency/ref_count.h"
-#include "tsl/platform/status_to_from_proto.h"
-#include "tsl/platform/statusor.h"
+#include "xla/tsl/platform/errors.h"
+#include "xla/tsl/platform/status_to_from_proto.h"
+#include "xla/tsl/platform/statusor.h"
 #include "tsl/profiler/lib/traceme.h"
 
 namespace xla {
@@ -60,8 +64,10 @@ absl::StatusOr<xla::ifrt::LoadedExecutableRef> Compiler::CompileAndLoad(
   auto request = std::make_unique<CompileRequest>();
   {
     tsl::profiler::TraceMe traceme("IfrtProxyProgramSerialize");
+    auto serialize_options = std::make_unique<xla::ifrt::SerializeOptions>(
+        rpc_helper_->ifrt_serdes_version());
     TF_ASSIGN_OR_RETURN(*request->mutable_program(),
-                        Serialize(*program, /*options=*/nullptr));
+                        Serialize(*program, std::move(serialize_options)));
   }
   tsl::profiler::TraceMe traceme_ifrt_entrypoint(
       [prog_size = request->program().data().size()]() {
@@ -99,10 +105,27 @@ absl::StatusOr<xla::ifrt::LoadedExecutableRef> Compiler::CompileAndLoad(
     }
 
     loaded_host_callbacks.swap(xla_options->loaded_host_callbacks);
+
+#if defined(PLATFORM_GOOGLE)
+    // Capture XLA flags.
+    // This is disabled for OSS because, if not, it creates a difference in
+    // behavior between OSS XLA_FLAGS and XLA TPU flags. XLA_FLAGS would be
+    // captured here and propagated to the server, but XLA TPU flags would not.
+    //
+    // With the current implementation both XLA_FLAGS and XLA TPU flags should
+    // be set at the proxy server in OSS/Cloud. For google internal usecases,
+    // both should be set at the proxy client.
+    auto& build_options = xla_options->compile_options.executable_build_options;
+    *build_options.mutable_debug_options() = xla::GetDebugOptionsFromFlags();
+    TF_RETURN_IF_ERROR(
+        build_options.mutable_comp_envs()->InitializeAllKnownEnvs());
+#endif
   }
 
+  auto serialize_options = std::make_unique<xla::ifrt::SerializeOptions>(
+      rpc_helper_->ifrt_serdes_version());
   TF_ASSIGN_OR_RETURN(*request->mutable_compile_options(),
-                      Serialize(*options, /*options=*/nullptr));
+                      Serialize(*options, std::move(serialize_options)));
 
   // TODO(b/266635130): Avoid blocking the caller.
   TF_ASSIGN_OR_RETURN(std::shared_ptr<CompileResponse> response,
@@ -136,11 +159,30 @@ absl::StatusOr<xla::ifrt::LoadedExecutableRef> Compiler::CompileAndLoad(
       response->loaded_host_callback_handles().begin(),
       response->loaded_host_callback_handles().end());
 
+  std::vector<xla::ifrt::Device*> devices;
+  if (rpc_helper_->protocol_version() < protocol_version::kExecutableDevices) {
+    devices.reserve(response->addressable_device_ids_size());
+    for (const int32_t device_id : response->addressable_device_ids()) {
+      TF_ASSIGN_OR_RETURN(xla::ifrt::Device* const device,
+                          client_->LookupDevice(DeviceId(device_id)));
+      devices.push_back(device);
+    }
+  } else {
+    devices.reserve(response->device_ids_size());
+    for (const int32_t device_id : response->device_ids()) {
+      TF_ASSIGN_OR_RETURN(xla::ifrt::Device* const device,
+                          client_->LookupDevice(DeviceId(device_id)));
+      devices.push_back(device);
+    }
+  }
+  TF_ASSIGN_OR_RETURN(DeviceListRef device_list,
+                      client_->MakeDeviceList(devices));
+
   return std::make_unique<LoadedExecutable>(
       client_, rpc_helper_, response->loaded_executable_handle(),
-      response->name(), response->num_devices(), std::move(addressable_devices),
-      std::move(fingerprint), std::move(ready_future),
-      std::move(loaded_host_callbacks),
+      response->name(), response->num_devices(), device_list,
+      std::move(addressable_devices), std::move(fingerprint),
+      std::move(ready_future), std::move(loaded_host_callbacks),
       std::move(loaded_host_callback_handles));
 }
 

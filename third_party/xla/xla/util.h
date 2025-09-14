@@ -69,7 +69,8 @@ namespace xla {
 //
 // and FromMixedRadix(digits) == n. The mixed radix representation is unique
 // modulo the product of the entries of bounds.
-std::vector<int64_t> ToMixedRadix(int64_t n, absl::Span<const int64_t> bounds);
+template <typename Container = std::vector<int64_t>>
+Container ToMixedRadix(int64_t n, absl::Span<const int64_t> bounds);
 
 // Logs the provided status message with a backtrace.
 //
@@ -374,8 +375,8 @@ XLA_ERROR_WITH_STRCAT_AND_BACKTRACE(Internal);
 // uniformly replaced with "indentation".
 std::string Reindent(absl::string_view original, absl::string_view indentation);
 
-template <typename Container>
-int64_t PositionInContainer(const Container& container, int64_t value) {
+template <typename Container, typename Value>
+int64_t PositionInContainer(const Container& container, const Value& value) {
   return std::distance(container.begin(), absl::c_find(container, value));
 }
 
@@ -765,7 +766,7 @@ std::vector<int64_t> ElemwiseProduct(absl::Span<const int64_t> a,
 // and `b` with the same product, i.e. `(i, j)` so
 // • a = {a[0 = i_0], ..., a[i_1 - 1], a[i_1], ... , a[i_2 - 1], ...}
 // • b = {b[0 = j_0], ..., b[j_1 - 1], b[j_1], ... , b[j_2 - 1], ...}
-// • ∀ k . 0 <= k < CommonFactors(a, b).size - 1 =>
+// • ∀ k . 0 <= k < CommonFactors(a, b).size =>
 //         a[i_k] × a[i_k + 1] × ... × a[i_(k+1) - 1] =
 //         b[j_k] × b[j_k + 1] × ... × b[j_(k+1) - 1]
 // where `CommonFactors(a, b)[CommonFactors(a, b).size - 1] = (a.size, b.size)`
@@ -800,6 +801,10 @@ DimensionVector GetNonContractingDims(
 
 // Removes illegal characters from filenames.
 std::string SanitizeFileName(std::string file_name);
+
+// Removes numerical identifiers and replaces separators in op names.
+std::string SanitizeOpName(std::string op_name, char separator,
+                           const std::string& replace_with);
 
 // Check that a sequence of distinct numbers can form a continuous interval.
 bool DistinctNumbersAreConsecutiveIfSorted(absl::Span<const int64_t>);
@@ -840,14 +845,16 @@ bool IsInt32(T x) {
   return static_cast<int32_t>(x) == x;
 }
 
-template <typename T>
-absl::Status EraseElementFromVector(std::vector<T>* container, const T& value) {
+template <typename Container, typename T>
+bool EraseElementFromVector(Container* container, const T& value) {
   // absl::c_find returns a const_iterator which does not seem to work on
   // gcc 4.8.4, and this breaks the ubuntu/xla_gpu build bot.
   auto it = std::find(container->begin(), container->end(), value);
-  TF_RET_CHECK(it != container->end());
+  if (it == container->end()) {
+    return false;
+  }
   container->erase(it);
-  return absl::OkStatus();
+  return true;
 }
 
 // Takes a sequence of unpacked kBitsPerElement-bit values (kBitsPerElement must
@@ -1018,8 +1025,6 @@ struct FreeDeleter {
 std::unique_ptr<void, FreeDeleter> AlignedAlloc(std::size_t alignment,
                                                 std::size_t size);
 
-}  // namespace xla
-
 // Note that STRING is evaluated regardless of whether it will be logged.
 #define XLA_LOG_LINES(SEV, STRING) \
   ::xla::LogLines##SEV(STRING, __FILE__, __LINE__)
@@ -1030,5 +1035,32 @@ std::unique_ptr<void, FreeDeleter> AlignedAlloc(std::size_t alignment,
   do {                                                  \
     if (VLOG_IS_ON(LEVEL)) XLA_LOG_LINES(INFO, STRING); \
   } while (false)
+
+// Implementation details only below here
+
+template <typename Container>
+Container ToMixedRadix(int64_t n, absl::Span<const int64_t> bounds) {
+  if (bounds.empty()) {
+    return {};
+  }
+
+  Container digits;
+  digits.reserve(bounds.size());
+  int64_t divisor = Product(bounds);
+  CHECK_GT(divisor, 0);
+  int64_t remainder = n % divisor;
+  for (const int64_t radix : bounds) {
+    CHECK_GT(radix, 0);
+    divisor /= radix;
+    CHECK_GT(divisor, 0);
+
+    // The divisor is always 1 for the last iteration.
+    digits.push_back(remainder / divisor);
+    remainder = remainder % divisor;
+  }
+  return digits;
+}
+
+}  // namespace xla
 
 #endif  // XLA_UTIL_H_

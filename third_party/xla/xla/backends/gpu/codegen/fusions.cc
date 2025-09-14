@@ -18,20 +18,19 @@ limitations under the License.
 #include <optional>
 #include <utility>
 
-#include "absl/algorithm/container.h"
 #include "absl/strings/string_view.h"
 #include "xla/backends/gpu/codegen/copy.h"
 #include "xla/backends/gpu/codegen/cudnn.h"
 #include "xla/backends/gpu/codegen/custom.h"
 #include "xla/backends/gpu/codegen/emitters/concatenate.h"
 #include "xla/backends/gpu/codegen/emitters/in_place_dynamic_update_slice.h"
-#include "xla/backends/gpu/codegen/emitters/input_slices.h"
 #include "xla/backends/gpu/codegen/emitters/loop.h"
 #include "xla/backends/gpu/codegen/emitters/reduction.h"
 #include "xla/backends/gpu/codegen/emitters/scatter.h"
 #include "xla/backends/gpu/codegen/emitters/transpose.h"
 #include "xla/backends/gpu/codegen/fusion_emitter.h"
 #include "xla/backends/gpu/codegen/triton/fusion.h"
+#include "xla/codegen/ir_emission_utils.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/hlo/utils/hlo_traversal.h"
@@ -40,39 +39,22 @@ limitations under the License.
 #include "xla/service/gpu/hlo_fusion_analysis.h"
 #include "xla/service/gpu/ir_emission_utils.h"
 #include "xla/shape.h"
-#include "xla/shape_util.h"
 
 namespace xla {
 namespace gpu {
-namespace {
-
-bool IsDynamicUpdateSliceFusion(const HloFusionAnalysis& analysis) {
-  return absl::c_all_of(
-      analysis.fusion_roots(), [](const HloInstructionAdaptor& root) {
-        return root.opcode() == HloOpcode::kDynamicUpdateSlice ||
-               (root.opcode() == HloOpcode::kBitcast &&
-                root.GetOperand(0).opcode() == HloOpcode::kDynamicUpdateSlice);
-      });
-}
-
-}  // namespace
 
 std::optional<std::unique_ptr<FusionInterface>> HloFusionInfo::GetCopyFusion()
     const {
-  if (analysis().GetEmitterFusionKind() ==
+  if (analysis().emitter_fusion_kind() ==
       HloFusionAnalysis::EmitterFusionKind::kDynamicMemcpy) {
-    if (IsDynamicUpdateSliceFusion(analysis()) &&
+    if (IsDynamicUpdateSliceFusion(analysis().fusion_spec()) &&
         !CanEmitDynamicUpdateSliceInPlace()) {
       // We currently only implement in-place DUSes as memcpys.
       return std::nullopt;
     }
 
-    auto dynamic_memcpy =
-        DynamicMemcpyFusion::GetMemcpyDescriptorForFusion(*instr_);
-    if (dynamic_memcpy) {
-      return std::make_unique<DynamicMemcpyFusion>(
-          analysis(), buffer_assignment_, std::move(*dynamic_memcpy));
-    }
+    return std::make_unique<DynamicMemcpyFusion>(analysis(),
+                                                 buffer_assignment_);
   }
 
   for (const HloInstructionAdaptor& root_adaptor : analysis().fusion_roots()) {
@@ -89,12 +71,8 @@ std::optional<std::unique_ptr<FusionInterface>> HloFusionInfo::GetCopyFusion()
 }
 
 bool HloFusionInfo::CanEmitDynamicUpdateSliceInPlace() const {
-  auto ret = CanEmitFusedDynamicUpdateSliceInPlaceForGpu(
-      analysis().fusion(),
-      [this](const HloInstruction* instruction, const ShapeIndex& index) {
-        return GetAllocationSlice(*buffer_assignment_, instruction, index);
-      },
-      instr_);
+  auto ret = CanEmitFusedDynamicUpdateSliceInPlace(analysis().fusion(),
+                                                   buffer_assignment_, instr_);
   return ret.ok() && *ret;
 }
 
@@ -103,7 +81,7 @@ std::unique_ptr<FusionInterface> GetFusionEmitter(
   const auto& analysis = fusion_info.analysis();
   const FusionBackendConfig& backend_config = analysis.fusion_backend_config();
 
-  switch (analysis.GetEmitterFusionKind()) {
+  switch (analysis.emitter_fusion_kind()) {
     case HloFusionAnalysis::EmitterFusionKind::kCustomFusion: {
       const absl::string_view& config_name =
           backend_config.custom_fusion_config().name();
@@ -118,8 +96,6 @@ std::unique_ptr<FusionInterface> GetFusionEmitter(
       }
       return std::make_unique<CustomFusion>();
     }
-    case HloFusionAnalysis::EmitterFusionKind::kInputSlices:
-      return std::make_unique<InputSlicesFusion>(analysis);
     case HloFusionAnalysis::EmitterFusionKind::kDynamicMemcpy:
     case HloFusionAnalysis::EmitterFusionKind::kLoop: {
       // Check for a memcpy fusion before checking if a DUS can be emitted in
@@ -128,7 +104,7 @@ std::unique_ptr<FusionInterface> GetFusionEmitter(
       if (auto copy_fusion = fusion_info.GetCopyFusion()) {
         return *std::move(copy_fusion);
       }
-      if (IsDynamicUpdateSliceFusion(analysis) &&
+      if (IsDynamicUpdateSliceFusion(analysis.fusion_spec()) &&
           fusion_info.CanEmitDynamicUpdateSliceInPlace()) {
         return std::make_unique<InPlaceDynamicUpdateSliceFusion>(analysis);
       }

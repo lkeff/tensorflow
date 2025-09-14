@@ -15,7 +15,6 @@ limitations under the License.
 
 #include <iostream>
 #include <memory>
-#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -34,6 +33,7 @@ limitations under the License.
 #include "xla/hlo/tools/hlo_diff/hlo_gumgraph_diff.h"
 #include "xla/hlo/tools/hlo_diff/render/hlo_gumgraph_html_renderer.h"
 #include "xla/hlo/tools/hlo_diff/render/hlo_gumgraph_text_renderer.h"
+#include "xla/service/hlo.pb.h"
 #include "xla/service/hlo_module_config.h"
 #include "xla/service/hlo_module_util.h"
 #include "xla/tsl/platform/env.h"
@@ -128,12 +128,28 @@ absl::StatusOr<std::unique_ptr<HloModule>> LoadHLOModule(
     return BuildHloModule(snapshot.hlo().hlo_module());
   }
   if (!hlo_path.hlo_proto.empty()) {
-    return ReadModuleFromBinaryProtoFile(hlo_path.hlo_proto,
-                                         xla::GetDebugOptionsFromFlags());
+    absl::StatusOr<std::unique_ptr<HloModule>> module =
+        ReadModuleFromBinaryProtoFile(hlo_path.hlo_proto,
+                                      xla::GetDebugOptionsFromFlags());
+    if (module.ok()) {
+      return module;
+    }
+    LOG(INFO) << "Failed to read " << hlo_path.hlo_proto
+              << " as a binary proto, attempting to read as text proto.";
+    return ReadModuleFromTextProtoFile(hlo_path.hlo_proto,
+                                       xla::GetDebugOptionsFromFlags());
   }
   if (!hlo_path.hlo_module_proto.empty()) {
-    return ReadModuleFromModuleBinaryProtofile(hlo_path.hlo_module_proto,
-                                               xla::GetDebugOptionsFromFlags());
+    absl::StatusOr<std::unique_ptr<HloModule>> module =
+        ReadModuleFromModuleBinaryProtofile(hlo_path.hlo_module_proto,
+                                            xla::GetDebugOptionsFromFlags());
+    if (module.ok()) {
+      return module;
+    }
+    LOG(INFO) << "Failed to read " << hlo_path.hlo_module_proto
+              << " as a binary proto, attempting to read as text proto.";
+    return ReadModuleFromModuleTextProtoFile(hlo_path.hlo_module_proto,
+                                             xla::GetDebugOptionsFromFlags());
   }
   if (!hlo_path.hlo_text.empty()) {
     return ReadModuleFromHloTextFile(

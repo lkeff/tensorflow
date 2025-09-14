@@ -15,14 +15,21 @@ limitations under the License.
 
 #include "xla/service/gpu/transforms/windowed_einsum_handler.h"
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "absl/algorithm/container.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/log/check.h"
+#include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/string_view.h"
@@ -34,6 +41,7 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/hlo/transforms/simplifiers/algebraic_simplifier.h"
+#include "xla/hlo/transforms/simplifiers/flatten_call_graph.h"
 #include "xla/hlo/transforms/simplifiers/hlo_constant_folding.h"
 #include "xla/hlo/utils/hlo_query.h"
 #include "xla/literal.h"
@@ -45,11 +53,10 @@ limitations under the License.
 #include "xla/service/while_loop_unroller.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
+#include "xla/tsl/platform/errors.h"
+#include "xla/tsl/platform/statusor.h"
 #include "xla/util.h"
 #include "xla/xla_data.pb.h"
-#include "tsl/platform/errors.h"
-#include "tsl/platform/logging.h"
-#include "tsl/platform/statusor.h"
 
 namespace xla::gpu {
 namespace {
@@ -703,9 +710,8 @@ absl::Status PostProcessUnrolledLoop(HloInstruction* loop, int64_t stream_id) {
     }
   }
   if (partial_accumulations.size() > 0 &&
-      while_body->name().find(
-          WindowedEinsumHandler::kWindowedEinsumAgLoopName) !=
-          std::string::npos) {
+      absl::StrContains(while_body->name(),
+                        WindowedEinsumHandler::kWindowedEinsumAgLoopName)) {
     TF_RETURN_IF_ERROR(
         MoveAccumulationOutsideLoop(partial_accumulations, while_body, loop));
   }
@@ -1404,9 +1410,10 @@ absl::StatusOr<bool> WindowedEinsumHandler::Run(
     // Since we get the loop directly from SPMD patitioner,
     // the induction variable pattern doesn't conform to what unroller
     // expects until the passes are applied.
-    TF_ASSIGN_OR_RETURN(bool applied_algsimp,
-                        AlgebraicSimplifier(AlgebraicSimplifierOptions())
-                            .Run(module, execution_threads));
+    AlgebraicSimplifierOptions options;
+    options.set_run_to_fixed_point(false);
+    TF_ASSIGN_OR_RETURN(bool applied_algsimp, AlgebraicSimplifier(options).Run(
+                                                  module, execution_threads));
     changed |= applied_algsimp;
     TF_ASSIGN_OR_RETURN(bool applied_cf,
                         HloConstantFolding().Run(module, execution_threads));
@@ -1434,6 +1441,12 @@ absl::StatusOr<bool> WindowedEinsumHandler::Run(
             /*force_unroll=*/false));
 
     if (result.unrolled) {
+      // Needed for the nested while loops in which the outer loop has been
+      // unrolled which leaves the call graph non-flat. This is likely not the
+      // optimal way to do things, but it preserves the previous behavior of
+      // UnrollAndReturnReplacement which used to do it internally.
+      TF_RETURN_IF_ERROR(FlattenCallGraph().Run(module).status());
+
       result.new_while_op->while_body()->SetAndSanitizeName(
           absl::StrCat("unrolled_", original_body_name));
       result.new_while_op->while_condition()->SetAndSanitizeName(

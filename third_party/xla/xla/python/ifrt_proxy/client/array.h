@@ -72,13 +72,11 @@ class Array final : public llvm::RTTIExtends<Array, xla::ifrt::Array> {
   MakeArraysFromHostBufferShards(
       xla::ifrt::Client* client, std::shared_ptr<RpcHelper> rpc_helper,
       absl::Span<xla::ifrt::Client::MakeArraysFromHostBufferShardsSpec> specs,
-      xla::ifrt::Client::HostBufferSemantics semantics,
-      tsl::RCReference<xla::ifrt::UserContext> user_context);
+      xla::ifrt::Client::HostBufferSemantics semantics);
 
   static absl::StatusOr<std::vector<xla::ifrt::ArrayRef>> MakeErrorArrays(
       xla::ifrt::Client* client, std::shared_ptr<RpcHelper> rpc_helper,
-      const absl::Status& error, absl::Span<const ArraySpec> array_specs,
-      tsl::RCReference<UserContext> user_context);
+      const absl::Status& error, absl::Span<const ArraySpec> array_specs);
 
   // `Array::AssembleArrayFromSingleDeviceArrays()` implements
   // `Client::AssembleArrayFromSingleDeviceArrays()`.
@@ -102,14 +100,17 @@ class Array final : public llvm::RTTIExtends<Array, xla::ifrt::Array> {
   // array becomes unusable afterwards.
   static void Destruct(RpcHelper* rpc_helper, ArrayHandle handle);
 
-  Array(xla::ifrt::Client* const client, std::shared_ptr<RpcHelper> rpc_helper,
-        DType dtype, Shape shape, ShardingRef sharding, ArrayHandle handle)
+  Array(xla::ifrt::Client* client, std::shared_ptr<RpcHelper> rpc_helper,
+        DType dtype, Shape shape, ShardingRef sharding, ArrayHandle arr_handle,
+        std::shared_ptr<const xla::PjRtLayout> layout)
       : client_(client),
         rpc_helper_(std::move(rpc_helper)),
         dtype_(dtype),
         shape_(std::move(shape)),
         sharding_(std::move(sharding)),
-        handle_(handle) {}
+        custom_layout_(std::move(layout)),
+        user_context_(UserContextScope::current()),
+        handle_(arr_handle) {}
 
   ~Array() override { Destruct(rpc_helper_.get(), handle_); }
 
@@ -139,6 +140,10 @@ class Array final : public llvm::RTTIExtends<Array, xla::ifrt::Array> {
     return handle_;
   }
 
+  std::shared_ptr<const xla::PjRtLayout> custom_layout() const {
+    return custom_layout_;
+  }
+
   xla::ifrt::Client* client() const override;
   Future<> GetReadyFuture() const override;
   Future<> Delete() override;
@@ -149,10 +154,9 @@ class Array final : public llvm::RTTIExtends<Array, xla::ifrt::Array> {
   const Shape& shape() const override { return shape_; }
   const Sharding& sharding() const override { return *sharding_; }
   ShardingRef shared_ptr_sharding() const override { return sharding_; }
-  absl::StatusOr<std::shared_ptr<const PjRtLayout>> layout() const override {
-    return absl::UnimplementedError(
-        "Array::layout() not implemented for IFRT proxy");
-  };
+  absl::StatusOr<std::shared_ptr<const PjRtLayout>> pjrt_layout()
+      const override;
+  UserContextRef user_context() const override { return user_context_; }
 
   absl::StatusOr<std::vector<xla::ifrt::ArrayRef>>
   DisassembleIntoSingleDeviceArrays(
@@ -188,6 +192,13 @@ class Array final : public llvm::RTTIExtends<Array, xla::ifrt::Array> {
   const Shape shape_;
   const ShardingRef sharding_;
 
+  // This is layout explicitly supplied at creation time. we explicitly
+  // distinguish it from default layouts since some functions
+  // behaves differently depending on where the layout came from.
+  const std::shared_ptr<const xla::PjRtLayout> custom_layout_;
+
+  const UserContextRef user_context_;
+
   const ArrayHandle handle_
       ABSL_DEPRECATED("Use GetHandle() function instead.");
 
@@ -198,6 +209,8 @@ class Array final : public llvm::RTTIExtends<Array, xla::ifrt::Array> {
     kAlive     // IsDeleted() will return false.
   };
   mutable DeletionState deleted_ ABSL_GUARDED_BY(mu_) = DeletionState::kAlive;
+
+  mutable Future<> ready_future_ ABSL_GUARDED_BY(mu_);
 };
 
 }  // namespace proxy

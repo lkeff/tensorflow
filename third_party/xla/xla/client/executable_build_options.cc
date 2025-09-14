@@ -27,7 +27,7 @@ limitations under the License.
 #include "xla/debug_options_flags.h"
 #include "xla/execution_options_util.h"
 #include "xla/layout_util.h"
-#include "xla/pjrt/compile_options.pb.h"
+#include "xla/pjrt/proto/compile_options.pb.h"
 #include "xla/service/compilation_environments.h"
 #include "xla/service/computation_placer.h"
 #include "xla/shape.h"
@@ -202,6 +202,7 @@ absl::StatusOr<ExecutableBuildOptionsProto> ExecutableBuildOptions::ToProto()
   output.set_use_shardy_partitioner(use_shardy_partitioner());
   output.set_process_index(process_index());
   output.set_process_count(process_count());
+  output.set_slice_size(slice_size());
   return output;
 }
 
@@ -258,6 +259,7 @@ absl::StatusOr<ExecutableBuildOptions> ExecutableBuildOptionsFromProto(
   output.set_use_shardy_partitioner(input.use_shardy_partitioner());
   output.set_process_index(input.process_index());
   output.set_process_count(input.process_count());
+  output.set_slice_size(input.slice_size());
   return output;
 }
 

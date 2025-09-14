@@ -29,6 +29,7 @@ limitations under the License.
 #include "xla/core/collectives/rank_id.h"
 #include "xla/service/collective_ops_utils.h"
 #include "xla/stream_executor/device_memory.h"
+#include "xla/stream_executor/platform.h"
 #include "xla/tsl/concurrency/async_value_ref.h"
 #include "xla/tsl/concurrency/chain.h"
 #include "xla/util.h"
@@ -66,10 +67,12 @@ class Communicator {
     virtual absl::Status Unregister() = 0;
   };
 
-  // Register `buffer` for efficient collective operations (i.e. on NCCL backend
-  // it registers the buffer for zero-copy collective operations).
-  virtual absl::StatusOr<std::unique_ptr<RegisteredBufferHandle>>
-  RegisterBuffer(stream_executor::DeviceMemoryBase buffer) {
+  // Register `buffer_range` once for efficient collective operations (i.e. on
+  // NCCL backend it registers the buffer for zero-copy collective operations).
+  //
+  virtual absl::Status RegisterBufferOnce(se::DeviceMemoryBase buffer_range,
+                                          int device_ordinal,
+                                          bool use_symmetric_buffer) {
     return Unimplemented("User-managed buffer registration is not supported");
   }
 
@@ -84,6 +87,12 @@ class Communicator {
   // previously launched asynchronous collective operations, and it does not
   // have to wait for the completion of scheduled operations.
   virtual absl::Status HealthCheck() const { return absl::OkStatus(); }
+
+  // This is a barrier operation that blocks all participating
+  // ranks from proceeding.
+  virtual absl::Status Barrier(const Executor& executor) {
+    return Unimplemented("Barrier is not implemented");
+  }
 
   // Reduce buffers of length `count` in `send_buff` using `reduction_kind`
   // reduction and leaves identical copies of the result on each `recv_buff`.
@@ -142,11 +151,46 @@ class Communicator {
                                          RankId peer,
                                          const Executor& executor) = 0;
 
+  // Send data from `send_buff` to rank `recv_buff` (one-way send).
+  virtual tsl::AsyncValueRef<Event> Send(se::DeviceMemoryBase recv_buffer,
+                                         se::DeviceMemoryBase send_buffer,
+                                         PrimitiveType dtype, size_t count,
+                                         RankId peer,
+                                         const Executor& executor) {
+    return Unimplemented("One-way send is not implemented");
+  }
+
+  // Receive data from rank `peer` into `recv_buff` (one-way recv).
+  virtual tsl::AsyncValueRef<Event> Recv(se::DeviceMemoryBase recv_buffer,
+                                         se::DeviceMemoryBase send_buffer,
+                                         PrimitiveType dtype, size_t count,
+                                         RankId peer,
+                                         const Executor& executor) {
+    return Unimplemented("One-way recv is not implemented");
+  }
+
   // Returns the number of ranks in the communicator.
   virtual absl::StatusOr<size_t> NumRanks() const = 0;
 
+  // Returns the current rank number in the communicator.
+  virtual absl::StatusOr<size_t> CurrentRank() {
+    return Unimplemented("CurrentRank is not implemented");
+  }
+
   // Returns a human-readable description of the communicator.
   virtual std::string ToString() const = 0;
+
+  // Guarantees completion of all operations on symmetric data objects which
+  // makes the updates visible to all other PEs.
+  virtual absl::Status Quiet(const Executor& executor) {
+    return Unimplemented("Quiet is not implemented");
+  }
+
+  // Guarantees ordering of delivery of all previous operations on symmetric
+  // data objects.
+  virtual absl::Status Fence() {
+    return Unimplemented("Fence is not implemented");
+  }
 
  protected:
   // Returns an `Event` that is always available.

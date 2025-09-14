@@ -2758,7 +2758,12 @@ TEST_P(PReluOpTest, PReluInt8SameShapes) {
       -1.0f, -1.0f, -1.0f,     // Row 2, Column 1
       -0.25f, -0.25f, -0.25f,  // Row 2, Column 2
   });
-  m.SetAlpha<int8_t>({0.0f, 0.5f, -0.5f});
+  m.SetAlpha<int8_t>({
+      0.0f, 0.5f, -0.5f,  // Row 1, Column 1
+      0.0f, 0.5f, -0.5f,  // Row 1, Column 2
+      0.0f, 0.5f, -0.5f,  // Row 2, Column 1
+      0.0f, 0.5f, -0.5f,  // Row 2, Column 2
+  });
   ASSERT_EQ(m.Invoke(), kTfLiteOk);
   EXPECT_THAT(m.GetDequantizedOutput<int8_t>(),
               ElementsAreArray(ArrayFloatNear(
@@ -2775,6 +2780,75 @@ TEST_P(PReluOpTest, PReluInt8SameShapes) {
                                          0, -64, 64,  // Row 2, Column 1
                                          0, -16, 16,  // Row 2, Column 2
                                      }));
+}
+
+TEST_P(PReluOpTest, PReluInt16) {
+  const float kMin = -1;
+  const float kMaxInt8 = 127.f / 128.f;
+  const float kMaxInt16 = 32767.f / 32768.f;
+  QuantizedPReluOpModel m({TensorType_INT16, {1, 2, 2, 3}, kMin, kMaxInt16},
+                          {TensorType_INT8, {1, 1, 3}, kMin, kMaxInt8});
+  m.SetInput<int16_t>({
+      0.0f, 0.0f, 0.0f,        // Row 1, Column 1
+      0.5f, 0.5f, 0.5f,        // Row 1, Column 2
+      -1.0f, -1.0f, -1.0f,     // Row 2, Column 1
+      -0.25f, -0.25f, -0.25f,  // Row 2, Column 2
+  });
+  m.SetAlpha<int8_t>({0.0f, 0.5f, -0.5f});
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
+  EXPECT_THAT(m.GetDequantizedOutput<int16_t>(),
+              ElementsAreArray(ArrayFloatNear(
+                  {
+                      0.0f, 0.0f, 0.0f,       // Row 1, Column 1
+                      0.5f, 0.5f, 0.5f,       // Row 1, Column 2
+                      0.0f, -0.5f, 0.5f,      // Row 2, Column 1
+                      0.0f, -0.125f, 0.125f,  // Row 2, Column 2
+                  },
+                  kQuantizedToleranceInt16)));
+  EXPECT_THAT(m.GetOutput<int16_t>(),
+              ElementsAreArray({
+                  0, 0, 0,              // Row 1, Column 1
+                  16384, 16384, 16384,  // Row 1, Column 2
+                  0, -16384, 16384,     // Row 2, Column 1
+                  0, -4096, 4096,       // Row 2, Column 2
+              }));
+}
+
+TEST_P(PReluOpTest, PReluInt16SameShapes) {
+  const float kMin = -1;
+  const float kMaxInt8 = 127.f / 128.f;
+  const float kMaxInt16 = 32767.f / 32768.f;
+  QuantizedPReluOpModel m({TensorType_INT16, {1, 2, 2, 3}, kMin, kMaxInt16},
+                          {TensorType_INT8, {1, 1, 3}, kMin, kMaxInt8});
+  m.SetInput<int16_t>({
+      0.0f, 0.0f, 0.0f,        // Row 1, Column 1
+      0.5f, 0.5f, 0.5f,        // Row 1, Column 2
+      -1.0f, -1.0f, -1.0f,     // Row 2, Column 1
+      -0.25f, -0.25f, -0.25f,  // Row 2, Column 2
+  });
+  m.SetAlpha<int8_t>({
+      0.0f, 0.5f, -0.5f,  // Row 1, Column 1
+      0.0f, 0.5f, -0.5f,  // Row 1, Column 2
+      0.0f, 0.5f, -0.5f,  // Row 2, Column 1
+      0.0f, 0.5f, -0.5f,  // Row 2, Column 2
+  });
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
+  EXPECT_THAT(m.GetDequantizedOutput<int16_t>(),
+              ElementsAreArray(ArrayFloatNear(
+                  {
+                      0.0f, 0.0f, 0.0f,       // Row 1, Column 1
+                      0.5f, 0.5f, 0.5f,       // Row 1, Column 2
+                      0.0f, -0.5f, 0.5f,      // Row 2, Column 1
+                      0.0f, -0.125f, 0.125f,  // Row 2, Column 2
+                  },
+                  kQuantizedToleranceInt16)));
+  EXPECT_THAT(m.GetOutput<int16_t>(),
+              ElementsAreArray({
+                  0, 0, 0,              // Row 1, Column 1
+                  16384, 16384, 16384,  // Row 1, Column 2
+                  0, -16384, 16384,     // Row 2, Column 1
+                  0, -4096, 4096,       // Row 2, Column 2
+              }));
 }
 
 class LeakyReluOpModel : public SingleOpModel {
@@ -2977,6 +3051,46 @@ TEST(QuantizedGeluOpTest, GeluUInt8Approximate) {
                   0.f, 0.84375f, 2.97656f,          // Row 1
                   0.84375f, -0.164062f, -0.046875f  // Row 2
               })));
+}
+
+void GeluInt16Test(bool approximate) {
+  // Define an input for GELU op.
+  const auto gelu_input = {
+      -6.0f, -5.5f, -5.0f, -4.5f, -4.0f, -3.5f, -3.0f, -2.5f, -2.0f,
+      -1.5f, -1.0f, -0.5f, 0.0f,  0.5f,  1.0f,  1.5f,  2.0f,  2.5f,
+      3.0f,  3.5f,  4.0f,  4.5f,  5.0f,  5.5f,  6.0f,
+  };
+
+  // Initialize the float GELU op model and run it. An output will be generated
+  // and compared with the quantized GELU op model output.
+  FloatGeluOpModel model(
+      {TensorType_FLOAT32, {1, static_cast<int>(gelu_input.size())}},
+      approximate);
+  model.SetInput(gelu_input);
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
+  const auto float_gelu_output = model.GetOutput();
+
+  // Initialize the quantized GELU op model and run it.
+  const float kMin = -1;
+  const float kMax = 32767.f / 32768.f;
+  QuantizedGeluOpModel quant_model({TensorType_INT16,
+                                    {1, static_cast<int>(gelu_input.size())},
+                                    6 * kMin,
+                                    6 * kMax},
+                                   approximate);
+  quant_model.SetInput<int16_t>(gelu_input);
+  ASSERT_EQ(quant_model.Invoke(), kTfLiteOk);
+
+  // Compare the float and quantized GELU op model outputs.
+  EXPECT_THAT(quant_model.GetDequantizedOutput<int16_t>(),
+              ElementsAreArray(
+                  ArrayFloatNear(float_gelu_output, kQuantizedToleranceInt16)));
+}
+
+TEST(QuantizedGeluOpTest, GeluInt16) { GeluInt16Test(/*approximate=*/false); }
+
+TEST(QuantizedGeluOpTest, GeluInt16Approximate) {
+  GeluInt16Test(/*approximate=*/true);
 }
 
 INSTANTIATE_TEST_SUITE_P(

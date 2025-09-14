@@ -29,8 +29,7 @@ limitations under the License.
 
 namespace xla::gpu {
 
-// Rewrites Triton GEMM fusions to generic Triton fusions. Any other fusions are
-// left unchanged.
+// Rewrites supported Triton GEMM fusions to generic Triton fusions.
 //
 // Fusions with kind kCustom and fusion_backend_config.kind "__triton_gemm" are
 // rewritten to fusion_backend_config.kind
@@ -59,6 +58,9 @@ class NestGemmFusion : public HloModulePass {
 
  private:
   const se::GpuComputeCapability compute_capability_;
+  absl::StatusOr<bool> RunOnModule(
+      HloModule* module,
+      const absl::flat_hash_set<absl::string_view>& execution_threads);
 };
 
 namespace detail {

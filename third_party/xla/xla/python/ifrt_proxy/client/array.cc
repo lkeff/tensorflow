@@ -39,6 +39,7 @@
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
 #include "llvm/Support/Casting.h"
+#include "xla/pjrt/pjrt_layout.h"
 #include "xla/python/ifrt/array.h"
 #include "xla/python/ifrt/array_spec.h"
 #include "xla/python/ifrt/client.h"
@@ -48,7 +49,6 @@
 #include "xla/python/ifrt/remap_plan.h"
 #include "xla/python/ifrt/shape.h"
 #include "xla/python/ifrt/sharding.h"
-#include "xla/python/ifrt/user_context.h"
 #include "xla/python/ifrt_proxy/client/global_flags.h"
 #include "xla/python/ifrt_proxy/client/rpc_helper.h"
 #include "xla/python/ifrt_proxy/common/array_util.h"
@@ -117,7 +117,7 @@ absl::StatusOr<uint64_t> MakeHostBuffer(
     mem_region = array_mem_region.mem_region();
   } else {
     // DType::kString
-    if (rpc_helper->version().protocol_version() < 9) {
+    if (rpc_helper->protocol_version() < 9) {
       return absl::UnimplementedError(
           "String arrays are not supported in ifrt-proxy version < 9");
     }
@@ -146,7 +146,7 @@ absl::StatusOr<uint64_t> MakeHostBuffer(
   const uint64_t host_buffer_handle = rpc_helper->NextHandle();
 
   if (GetGlobalClientFlags()->synchronous_host_buffer_store ||
-      rpc_helper->version().protocol_version() < 10) {
+      rpc_helper->protocol_version() < 10) {
     // Synchronously send data and await.
     TF_RETURN_IF_ERROR(rpc_helper->host_buffer_store()
                            ->Store(host_buffer_handle, mem_region)
@@ -224,16 +224,17 @@ absl::StatusOr<xla::ifrt::ArrayRef> Array::MakeArrayFromHostBuffer(
   // Reuse the host_buffer_handle as also the client-generated
   // array_handle.
   req->set_array_handle(host_buffer_handle);
-  *req->mutable_dtype() = dtype.ToProto();
-  *req->mutable_shape() = shape.ToProto();
-  TF_ASSIGN_OR_RETURN(*req->mutable_sharding(), sharding->ToProto());
+  *req->mutable_dtype() = dtype.ToProto(rpc_helper->ifrt_serdes_version());
+  *req->mutable_shape() = shape.ToProto(rpc_helper->ifrt_serdes_version());
+  TF_ASSIGN_OR_RETURN(*req->mutable_sharding(),
+                      sharding->ToProto(rpc_helper->ifrt_serdes_version()));
   if (byte_strides.has_value()) {
     *req->mutable_byte_strides() = ToByteStridesProto(*byte_strides);
   }
 
   ArrayHandle arr_handle;
   if (GetGlobalClientFlags()->synchronous_host_buffer_store ||
-      rpc_helper->version().protocol_version() < 10) {
+      rpc_helper->protocol_version() < 10) {
     TF_ASSIGN_OR_RETURN(
         auto resp, rpc_helper->MakeArrayFromHostBuffer(std::move(req)).Await());
     arr_handle.handle = resp->array_handle();
@@ -245,23 +246,21 @@ absl::StatusOr<xla::ifrt::ArrayRef> Array::MakeArrayFromHostBuffer(
 
   std::move(cleanup).Cancel();
 
-  return xla::ifrt::ArrayRef(
-      tsl::MakeRef<Array>(client, std::move(rpc_helper), dtype,
-                          std::move(shape), std::move(sharding), arr_handle));
+  return xla::ifrt::ArrayRef(tsl::MakeRef<Array>(
+      client, std::move(rpc_helper), dtype, std::move(shape),
+      std::move(sharding), arr_handle, /*layout=*/nullptr));
 }
 
 absl::StatusOr<std::vector<xla::ifrt::ArrayRef>>
 Array::MakeArraysFromHostBufferShards(
     xla::ifrt::Client* client, std::shared_ptr<RpcHelper> rpc_helper,
     absl::Span<xla::ifrt::Client::MakeArraysFromHostBufferShardsSpec> specs,
-    xla::ifrt::Client::HostBufferSemantics semantics,
-    tsl::RCReference<xla::ifrt::UserContext> user_context) {
-  if (rpc_helper->version().protocol_version() <
+    xla::ifrt::Client::HostBufferSemantics semantics) {
+  if (rpc_helper->protocol_version() <
       protocol_version::kMakeArraysFromHostBufferShards) {
-    return xla::ifrt::ClientMakeArraysFromHostBufferShards(
-        client, specs, semantics, std::move(user_context));
+    return xla::ifrt::ClientMakeArraysFromHostBufferShards(client, specs,
+                                                           semantics);
   }
-  // TODO(b/407104769): Handle `user_context`.
 
   absl::InlinedVector<absl::InlinedVector<uint64_t, 1>, 1>
       host_buffer_handles_for_specs;
@@ -321,8 +320,10 @@ Array::MakeArraysFromHostBufferShards(
 
       MakeArraysFromHostBufferShardsRequest::HostBuffer* host_buffer_proto =
           spec_proto->add_host_buffers();
-      *host_buffer_proto->mutable_dtype() = host_buffer.dtype.ToProto();
-      *host_buffer_proto->mutable_shape() = host_buffer.shape.ToProto();
+      *host_buffer_proto->mutable_dtype() =
+          host_buffer.dtype.ToProto(rpc_helper->ifrt_serdes_version());
+      *host_buffer_proto->mutable_shape() =
+          host_buffer.shape.ToProto(rpc_helper->ifrt_serdes_version());
       host_buffer_proto->set_host_buffer_handle(
           host_buffer_handles_for_specs[spec_idx][buffer_idx]);
       if (host_buffer.byte_strides.has_value()) {
@@ -330,8 +331,9 @@ Array::MakeArraysFromHostBufferShards(
             ToByteStridesProto(*host_buffer.byte_strides);
       }
     }
-    TF_ASSIGN_OR_RETURN(*spec_proto->mutable_array_spec(),
-                        spec.array_spec.ToProto());
+    TF_ASSIGN_OR_RETURN(
+        *spec_proto->mutable_array_spec(),
+        spec.array_spec.ToProto(rpc_helper->ifrt_serdes_version()));
 
     if (!GetGlobalClientFlags()->synchronous_host_buffer_store) {
       uint64_t arr_handle;
@@ -370,15 +372,14 @@ Array::MakeArraysFromHostBufferShards(
     arrays.push_back(tsl::MakeRef<Array>(
         client, rpc_helper, spec.array_spec.dtype,
         std::move(spec.array_spec.shape), std::move(spec.array_spec.sharding),
-        arr_handles[spec_idx]));
+        arr_handles[spec_idx], spec.array_spec.layout));
   }
   return arrays;
 }
 
 absl::StatusOr<std::vector<xla::ifrt::ArrayRef>> Array::MakeErrorArrays(
     xla::ifrt::Client* client, std::shared_ptr<RpcHelper> rpc_helper,
-    const absl::Status& error, absl::Span<const ArraySpec> array_specs,
-    tsl::RCReference<UserContext> user_context) {
+    const absl::Status& error, absl::Span<const ArraySpec> array_specs) {
   auto req = std::make_unique<MakeErrorArraysRequest>();
   *req->mutable_error() = tsl::StatusToProto(error);
 
@@ -388,11 +389,12 @@ absl::StatusOr<std::vector<xla::ifrt::ArrayRef>> Array::MakeErrorArrays(
   for (const ArraySpec& array_spec : array_specs) {
     const uint64_t array_handle = rpc_helper->NextHandle();
     req->add_array_handles(array_handle);
-    TF_ASSIGN_OR_RETURN(*req->add_array_specs(), array_spec.ToProto());
+    TF_ASSIGN_OR_RETURN(*req->add_array_specs(),
+                        array_spec.ToProto(rpc_helper->ifrt_serdes_version()));
     arr_handles.push_back(ArrayHandle{array_handle});
   }
 
-  if (rpc_helper->version().protocol_version() < 10) {
+  if (rpc_helper->protocol_version() < 10) {
     TF_ASSIGN_OR_RETURN(auto resp,
                         rpc_helper->MakeErrorArrays(std::move(req)).Await());
     for (const uint64_t array_handle : resp->array_handles()) {
@@ -409,13 +411,13 @@ absl::StatusOr<std::vector<xla::ifrt::ArrayRef>> Array::MakeErrorArrays(
     const xla::ifrt::ArraySpec& array_spec = array_specs[i];
     arrays.push_back(tsl::MakeRef<Array>(client, rpc_helper, array_spec.dtype,
                                          array_spec.shape, array_spec.sharding,
-                                         arr_handles[i]));
+                                         arr_handles[i], array_spec.layout));
   }
   return arrays;
 }
 
 void Array::Destruct(RpcHelper* rpc_helper, ArrayHandle handle) {
-  if (rpc_helper->version().protocol_version() >= 5) {
+  if (rpc_helper->protocol_version() >= 5) {
     rpc_helper->Batch(RpcHelper::kDestructArray, handle);
     return;
   }
@@ -436,23 +438,26 @@ void Array::Destruct(RpcHelper* rpc_helper, ArrayHandle handle) {
 Future<> Array::GetReadyFuture() const {
   tsl::profiler::TraceMe traceme_ifrt_entrypoint(
       "IfrtProxyEntrypointArrayGetReadyFuture");
+  if (IsDeleted()) {
+    return Future<>(absl::InvalidArgumentError("Already deleted array."));
+  }
 
-  {
-    absl::MutexLock lock(&mu_);
-    if (deleted_ == DeletionState::kDeleted) {
-      return Future<>(absl::InvalidArgumentError("Already deleted array."));
-    }
+  absl::MutexLock lock(&mu_);
+
+  if (ready_future_.IsValid()) {
+    return ready_future_;
   }
 
   auto req = std::make_unique<CheckValueReadyRequest>();
   req->add_value_handles(handle_.handle);
 
-  auto promise = Future<>::CreatePromise();
+  auto [promise, future] = Future<>::MakePromise();
   rpc_helper_->CheckValueReady(std::move(req))
-      .OnReady(
-          [promise](absl::StatusOr<std::shared_ptr<CheckValueReadyResponse>>
-                        resp) mutable { promise.Set(resp.status()); });
-  return Future<>(std::move(promise));
+      .OnReady([promise = std::move(promise)](
+                   absl::StatusOr<std::shared_ptr<CheckValueReadyResponse>>
+                       resp) mutable { promise.Set(resp.status()); });
+  ready_future_ = std::move(future);
+  return ready_future_;
 }
 
 Future<> Array::Delete() {
@@ -460,7 +465,7 @@ Future<> Array::Delete() {
     absl::MutexLock lock(&mu_);
     deleted_ = DeletionState::kDeleted;
   }
-  if (rpc_helper_->version().protocol_version() >= 5) {
+  if (rpc_helper_->protocol_version() >= 5) {
     rpc_helper_->Batch(RpcHelper::kDeleteArray, handle_);
     return Future<>(absl::OkStatus());
   }
@@ -535,18 +540,23 @@ absl::StatusOr<xla::ifrt::ArrayRef> Array::AssembleArrayFromSingleDeviceArrays(
       });
   if (single_device_shard_semantics ==
           SingleDeviceShardSemantics::kAddressableShards &&
-      rpc_helper->version().protocol_version() < 8) {
+      rpc_helper->protocol_version() < 8) {
     return absl::UnimplementedError(
         "SingleDeviceShardSemantics::kAdressableShards is not supported in "
         "ifrt-proxy version < 8");
   }
+  if (arrays.empty()) {
+    return absl::InvalidArgumentError(
+        "AssembleArrayFromSingleDeviceArrays() called with empty arrays list");
+  }
   auto req = std::make_unique<AssembleArrayFromSingleDeviceArraysRequest>();
-  *req->mutable_shape() = shape.ToProto();
-  TF_ASSIGN_OR_RETURN(*req->mutable_sharding(), sharding->ToProto());
+  *req->mutable_shape() = shape.ToProto(rpc_helper->ifrt_serdes_version());
+  TF_ASSIGN_OR_RETURN(*req->mutable_sharding(),
+                      sharding->ToProto(rpc_helper->ifrt_serdes_version()));
   req->set_copy_semantics(ToArrayCopySemanticsProto(array_copy_semantics));
   req->set_single_device_shard_semantics(
       ToSingleDeviceShardSemanticsProto(single_device_shard_semantics));
-  *req->mutable_dtype() = dtype.ToProto();
+  *req->mutable_dtype() = dtype.ToProto(rpc_helper->ifrt_serdes_version());
   for (const xla::ifrt::ArrayRef& rcref : arrays) {
     Array* array = llvm::dyn_cast<Array>(rcref.get());
     if (array == nullptr) {
@@ -561,7 +571,7 @@ absl::StatusOr<xla::ifrt::ArrayRef> Array::AssembleArrayFromSingleDeviceArrays(
   }
 
   ArrayHandle result_handle;
-  if (rpc_helper->version().protocol_version() <
+  if (rpc_helper->protocol_version() <
       protocol_version::kClientHandlesOptimization2) {
     TF_ASSIGN_OR_RETURN(
         std::shared_ptr<AssembleArrayFromSingleDeviceArraysResponse> response,
@@ -576,9 +586,13 @@ absl::StatusOr<xla::ifrt::ArrayRef> Array::AssembleArrayFromSingleDeviceArrays(
         result_handle);
   }
 
+  // We assume that all shards have the same layout.
+  const xla::ifrt::ArrayRef& rcref = arrays[0];
+  Array* array = llvm::cast<Array>(rcref.get());
+
   return xla::ifrt::ArrayRef(tsl::MakeRef<Array>(
       client, std::move(rpc_helper), dtype, std::move(shape),
-      std::move(sharding), result_handle));
+      std::move(sharding), result_handle, array->custom_layout()));
 }
 
 absl::StatusOr<std::vector<xla::ifrt::ArrayRef>> Array::RemapArrays(
@@ -601,7 +615,8 @@ absl::StatusOr<std::vector<xla::ifrt::ArrayRef>> Array::RemapArrays(
 
   auto req = std::make_unique<RemapArraysRequest>();
   TF_RET_CHECK(!arrays.empty());
-  TF_ASSIGN_OR_RETURN(*req->mutable_plan(), plan.ToProto());
+  TF_ASSIGN_OR_RETURN(*req->mutable_plan(),
+                      plan.ToProto(rpc_helper->ifrt_serdes_version()));
   req->set_copy_semantics(ToArrayCopySemanticsProto(semantics));
   for (int i = 0; i < num_inputs; ++i) {
     const xla::ifrt::ArrayRef& rcref = arrays[i];
@@ -643,8 +658,18 @@ absl::StatusOr<std::vector<xla::ifrt::ArrayRef>> Array::RemapArrays(
     req->add_array_handles(handle.handle);
   }
 
+  std::vector<std::shared_ptr<const xla::PjRtLayout>> output_layouts(
+      plan.output_specs.size());
+  for (const auto& mapping : *plan.mappings) {
+    if (output_layouts[mapping.out_array] == nullptr) {
+      const xla::ifrt::ArrayRef& rcref = arrays[mapping.in_array];
+      Array* array = llvm::cast<Array>(rcref.get());
+      output_layouts[mapping.out_array] = array->custom_layout();
+    }
+  }
+
   std::vector<ArrayHandle> result_handles;
-  if (rpc_helper->version().protocol_version() <
+  if (rpc_helper->protocol_version() <
       protocol_version::kClientHandlesOptimization2) {
     TF_ASSIGN_OR_RETURN(std::shared_ptr<RemapArraysResponse> response,
                         rpc_helper->RemapArrays(std::move(req)).Await());
@@ -660,15 +685,16 @@ absl::StatusOr<std::vector<xla::ifrt::ArrayRef>> Array::RemapArrays(
     }
     CheckResponseAfterAsyncCall(rpc_helper->RemapArrays(std::move(req)),
                                 result_handles);
+    TF_RET_CHECK(result_handles.size() == plan.output_specs.size());
   }
 
   std::vector<xla::ifrt::ArrayRef> result;
   result.reserve(result_handles.size());
   for (int i = 0; i < result_handles.size(); ++i) {
-    result.push_back(xla::ifrt::ArrayRef(
-        tsl::MakeRef<Array>(client, rpc_helper, plan.output_specs[i].dtype,
-                            plan.output_specs[i].shape,
-                            plan.output_specs[i].sharding, result_handles[i])));
+    result.push_back(xla::ifrt::ArrayRef(tsl::MakeRef<Array>(
+        client, rpc_helper, plan.output_specs[i].dtype,
+        plan.output_specs[i].shape, plan.output_specs[i].sharding,
+        result_handles[i], std::move(output_layouts[i]))));
   }
   return result;
 }
@@ -681,7 +707,7 @@ Array::DisassembleIntoSingleDeviceArrays(
       "IfrtProxyEntrypointDisassembleIntoSingleDeviceArrays");
   if (single_device_shard_semantics ==
           SingleDeviceShardSemantics::kAddressableShards &&
-      rpc_helper_->version().protocol_version() < 8) {
+      rpc_helper_->protocol_version() < 8) {
     return absl::UnimplementedError(
         "SingleDeviceShardSemantics::kAdressableShards is not supported in "
         "version < 8");
@@ -697,7 +723,7 @@ Array::DisassembleIntoSingleDeviceArrays(
   TF_ASSIGN_OR_RETURN(auto shape_and_shardings, sharding_->Disassemble(shape_));
   result_handles.reserve(shape_and_shardings.size());
 
-  if (rpc_helper_->version().protocol_version() <
+  if (rpc_helper_->protocol_version() <
       protocol_version::kClientHandlesOptimization2) {
     TF_ASSIGN_OR_RETURN(
         std::shared_ptr<DisassembleIntoSingleDeviceArraysResponse> response,
@@ -725,7 +751,8 @@ Array::DisassembleIntoSingleDeviceArrays(
   for (int i = 0; i < result_handles.size(); ++i) {
     result.push_back(xla::ifrt::ArrayRef(tsl::MakeRef<Array>(
         client_, rpc_helper_, dtype_, std::move(shape_and_shardings[i].first),
-        std::move(shape_and_shardings[i].second), result_handles[i])));
+        std::move(shape_and_shardings[i].second), result_handles[i],
+        this->custom_layout())));
   }
 
   return result;
@@ -741,7 +768,7 @@ absl::StatusOr<xla::ifrt::ArrayRef> Array::FullyReplicatedShard(
   req->set_copy_semantics(ToArrayCopySemanticsProto(semantics));
 
   ArrayHandle result_handle;
-  if (rpc_helper_->version().protocol_version() <
+  if (rpc_helper_->protocol_version() <
       protocol_version::kClientHandlesOptimization2) {
     TF_ASSIGN_OR_RETURN(
         std::shared_ptr<FullyReplicatedShardResponse> response,
@@ -763,9 +790,9 @@ absl::StatusOr<xla::ifrt::ArrayRef> Array::FullyReplicatedShard(
       xla::ifrt::SingleDeviceSharding::Create(
           sharding_->devices()->devices().front(), sharding_->memory_kind());
 
-  return xla::ifrt::ArrayRef(
-      tsl::MakeRef<Array>(client_, rpc_helper_, dtype_, shape_,
-                          std::move(single_device_sharding), result_handle));
+  return xla::ifrt::ArrayRef(tsl::MakeRef<Array>(
+      client_, rpc_helper_, dtype_, shape_, std::move(single_device_sharding),
+      result_handle, this->custom_layout()));
 }
 
 Future<> Array::CopyToStringHostBuffer(
@@ -773,7 +800,7 @@ Future<> Array::CopyToStringHostBuffer(
     ArrayCopySemantics semantics) {
   tsl::profiler::TraceMe traceme_ifrt_entrypoint(
       "IfrtProxyEntrypointCopyToStringHostBuffer");
-  if (rpc_helper_->version().protocol_version() < 9) {
+  if (rpc_helper_->protocol_version() < 9) {
     return Future<>(absl::UnimplementedError(
         "String arrays are not supported in ifrt-proxy version < 9"));
   }
@@ -790,8 +817,8 @@ Future<> Array::CopyToStringHostBuffer(
 
   const uint64_t host_buffer_handle = rpc_helper_->NextHandle();
   req->set_host_buffer_handle(host_buffer_handle);
-  auto promise = Future<>::CreatePromise();
-  auto on_ready = [promise,
+  auto [promise, future] = Future<>::MakePromise();
+  auto on_ready = [promise = std::move(promise),
                    host_buffer_store = rpc_helper_->host_buffer_store(),
                    host_buffer_handle,
                    dst_buffer = static_cast<absl::Cord*>(data)](
@@ -802,7 +829,8 @@ Future<> Array::CopyToStringHostBuffer(
       return;
     }
     host_buffer_store->Lookup(host_buffer_handle)
-        .OnReady([promise, dst_buffer, host_buffer_store, host_buffer_handle](
+        .OnReady([promise = std::move(promise), dst_buffer, host_buffer_store,
+                  host_buffer_handle](
                      absl::StatusOr<absl::Cord> array_contents) mutable {
           absl::Cleanup cleanup = [&]() {
             host_buffer_store->Delete(host_buffer_handle)
@@ -827,7 +855,7 @@ Future<> Array::CopyToStringHostBuffer(
         });
   };
   rpc_helper_->CopyToHostBuffer(std::move(req)).OnReady(std::move(on_ready));
-  return Future<>(std::move(promise));
+  return std::move(future);
 }
 
 Future<> Array::CopyToHostBuffer(
@@ -855,9 +883,9 @@ Future<> Array::CopyToHostBuffer(
   const uint64_t host_buffer_handle = rpc_helper_->NextHandle();
   req->set_host_buffer_handle(host_buffer_handle);
 
-  auto promise = Future<>::CreatePromise();
+  auto [promise, future] = Future<>::MakePromise();
   auto on_ready = [host_buffer_store = rpc_helper_->host_buffer_store(),
-                   promise, host_buffer_handle,
+                   promise = std::move(promise), host_buffer_handle,
                    mem_region = mem_region->mem_region()](
                       absl::StatusOr<std::shared_ptr<CopyToHostBufferResponse>>
                           resp) mutable {
@@ -868,7 +896,7 @@ Future<> Array::CopyToHostBuffer(
 
     auto host_buffer = host_buffer_store->Lookup(host_buffer_handle);
     host_buffer.OnReady(
-        [promise, mem_region, host_buffer_store,
+        [promise = std::move(promise), mem_region, host_buffer_store,
          host_buffer_handle](absl::StatusOr<absl::Cord> data) mutable {
           absl::Cleanup cleanup = [&]() {
             host_buffer_store->Delete(host_buffer_handle)
@@ -903,7 +931,19 @@ Future<> Array::CopyToHostBuffer(
         });
   };
   rpc_helper_->CopyToHostBuffer(std::move(req)).OnReady(std::move(on_ready));
-  return Future<>(std::move(promise));
+  return std::move(future);
+}
+
+absl::StatusOr<std::shared_ptr<const PjRtLayout>> Array::pjrt_layout() const {
+  absl::MutexLock l(&mu_);
+  if (custom_layout_ != nullptr) {
+    return custom_layout_;
+  }
+
+  TF_ASSIGN_OR_RETURN(auto shard_shape, sharding_->GetShardShape(shape_));
+  return client_->GetDefaultLayout(dtype_, shard_shape.dims(),
+                                   sharding_->devices()->devices().front(),
+                                   sharding_->memory_kind());
 }
 
 xla::ifrt::Client* Array::client() const { return client_; }

@@ -2,6 +2,7 @@ load(
     "@local_config_rocm//rocm:build_defs.bzl",
     "if_rocm_is_configured",
 )
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("//xla:lit.bzl", "enforce_glob", "lit_test_suite")
 load(
     "//xla/stream_executor:build_defs.bzl",
@@ -10,7 +11,7 @@ load(
 load("//xla/tsl:tsl.default.bzl", "filegroup")
 load(
     "//xla/tsl/platform:build_config_root.bzl",
-    "tf_cuda_tests_tags",
+    "tf_gpu_tests_tags",
 )
 
 # hlo-opt tool.
@@ -43,9 +44,9 @@ cc_library(
         "//xla/service:compiler",
         "//xla/service:conditional_simplifier",
         "//xla/service:conditional_to_select",
-        "//xla/service:copy_insertion",
         "//xla/service:executable",
         "//xla/service:gather_expander",
+        "//xla/service:hlo_graph_dumper",
         "//xla/service:map_inliner",
         "//xla/service:platform_util",
         "//xla/service:reduce_scatter_reassociate",
@@ -59,7 +60,6 @@ cc_library(
         "//xla/service:while_loop_constant_sinking",
         "//xla/service:while_loop_invariant_code_motion",
         "//xla/service:while_loop_simplifier",
-        "//xla/service/gpu/transforms:collective_permute_valid_iteration_annotator",
         "//xla/service/gpu/transforms:scatter_expander",
         "//xla/service/gpu/transforms:scatter_slice_simplifier",
         "//xla/service/gpu/transforms/collectives:all_gather_dynamic_slice_simplifier",
@@ -83,24 +83,29 @@ cc_library(
     deps = [
         ":compiled_opt_lib",
         "//xla:debug_options_flags",
+        "//xla:shape_util",
         "//xla:types",
         "//xla/hlo/ir:hlo",
         "//xla/hlo/pass:hlo_pass_pipeline",
+        "//xla/hlo/transforms:host_offloader",
         "//xla/hlo/transforms/simplifiers:algebraic_simplifier",
+        "//xla/hlo/transforms/simplifiers:hlo_memory_scheduler",
         "//xla/hlo/transforms/simplifiers:reduce_window_rewriter",
         "//xla/service:buffer_value",
         "//xla/service:compiler",
+        "//xla/service:copy_insertion",
         "//xla/service:dump",
         "//xla/service:executable",
         "//xla/service:hlo_graph_dumper",
         "//xla/service:hlo_module_config",
         "//xla/service:platform_util",
-        "//xla/service/gpu:buffer_sharing",
+        "//xla/service/gpu:alias_info",
         "//xla/service/gpu:compile_module_to_llvm_ir",
         "//xla/service/gpu:executable_proto_cc",
         "//xla/service/gpu:gpu_compiler",
         "//xla/service/gpu:gpu_hlo_schedule",
         "//xla/service/gpu:gpu_spmd_pipeline",
+        "//xla/service/gpu:nvptx_alias_info",
         "//xla/service/gpu/transforms:cudnn_custom_call_converter",
         "//xla/service/gpu/transforms:dot_algorithm_rewriter",
         "//xla/service/gpu/transforms:dot_dimension_sorter",
@@ -110,7 +115,6 @@ cc_library(
         "//xla/service/gpu/transforms:gemm_broadcast_folding_rewriter",
         "//xla/service/gpu/transforms:gemm_fusion",
         "//xla/service/gpu/transforms:gemv_rewriter",
-        "//xla/service/gpu/transforms:pipelined_p2p_rewriter",
         "//xla/service/gpu/transforms:reduce_scatter_creator",
         "//xla/service/gpu/transforms:reduction_degenerate_dim_remover",
         "//xla/service/gpu/transforms:reduction_dimension_grouper",
@@ -155,6 +159,7 @@ cc_library(
     deps = [
         ":compiled_opt_lib",
         "//xla:debug_options_flags",
+        "//xla:shape_util",
         "//xla:util",
         "//xla:xla_data_proto_cc",
         "//xla:xla_proto_cc",
@@ -162,11 +167,15 @@ cc_library(
         "//xla/backends/cpu/codegen:ir_compiler",
         "//xla/backends/cpu/codegen:jit_compiler",
         "//xla/backends/cpu/codegen:target_machine_features",
+        "//xla/hlo/analysis:alias_info",
         "//xla/hlo/ir:hlo",
         "//xla/hlo/tools/hlo_opt:opt_lib",
+        "//xla/hlo/transforms:host_offloader",
+        "//xla/hlo/transforms/simplifiers:hlo_memory_scheduler",
         "//xla/hlo/translate/hlo_to_mhlo:hlo_to_mlir_hlo",
         "//xla/service:batchnorm_expander",
         "//xla/service:change_op_data_type",
+        "//xla/service:copy_insertion",
         "//xla/service:cpu_plugin",
         "//xla/service:dynamic_dimension_inference",
         "//xla/service:dynamic_padder",
@@ -235,10 +244,10 @@ lit_test_suite(
     ]),
     cfg = "//xla:lit.cfg.py",
     data = [":test_utilities"],
-    default_tags = tf_cuda_tests_tags(),
-    hermetic_cuda_data_dir = "%S/../../../../cuda_nvcc",
+    default_tags = tf_gpu_tests_tags(),
+    hermetic_cuda_data_dir = "%S/../../../../../cuda_nvcc",
     tags_override = {
-        "gpu_hlo_ptx.hlo": ["cuda-only"],
+        "tests/gpu_hlo_ptx.hlo": ["cuda-only"],
     },
     tools = [
         "//xla/tools:hlo-opt",

@@ -112,6 +112,7 @@ template <typename HloT>
 absl::Status HloPassPipeline::RunInvariantCheckers(
     HloT* hlo, absl::string_view after_pass_name,
     const absl::flat_hash_set<absl::string_view>& execution_threads) {
+  tsl::profiler::TraceMe traceme("RunInvariantCheckers");
   for (auto& invariant_checker : invariant_checkers_) {
     VLOG(1) << "    Invariant checker " << invariant_checker->name();
     absl::StatusOr<bool> changed_status =
@@ -148,7 +149,7 @@ static void VerifyPassChangedReport(const HloT* hlo, bool pass_changed,
                                     absl::string_view pass_name,
                                     absl::string_view pipeline_name,
                                     size_t hash_before) {
-  size_t hash_after = absl::HashOf(hlo);
+  size_t hash_after = absl::HashOf(*hlo);
   // Fail if pass changed HLO but has reported that it didn't.
   if (!pass_changed && hash_after != hash_before &&
       debug_options.xla_unsupported_crash_on_hlo_pass_silent_hlo_change()) {

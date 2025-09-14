@@ -45,6 +45,7 @@ limitations under the License.
 #include "xla/shape_util.h"
 #include "xla/status_macros.h"
 #include "xla/tsl/lib/gtl/value_or_die.h"
+#include "xla/tsl/platform/status.h"
 #include "xla/util.h"
 #include "xla/xla_data.pb.h"
 #include "tsl/platform/errors.h"
@@ -124,10 +125,6 @@ struct HloProtoEvaluator {
   HloProtoEvaluator& WithComputation(
       std::unique_ptr<HloComputation> new_computation) {
     computation = new_computation.get();
-    computation->ClearUniqueIdInternal();
-    for (HloInstruction* inst : computation->instructions()) {
-      inst->ClearUniqueIdInternal();
-    }
     module.AddEmbeddedComputation(std::move(new_computation));
     return *this;
   }
@@ -167,7 +164,10 @@ struct HloProtoEvaluator {
       int64_t operand_handle = inst.operand_ids(i);
       std::unique_ptr<HloInstruction> operand =
           HloInstruction::CreateConstant(operands[i].Clone());
-      operand_map[operand_handle] = operand.get();
+      // FromProto uses local ids, so explicitly downcasts the unique id to
+      // a local id to avoid issues.
+      operand_map[HloInstruction::CalculateLocalId(operand_handle)] =
+          operand.get();
       builder.AddInstruction(std::move(operand));
     }
 
@@ -189,7 +189,6 @@ struct HloProtoEvaluator {
     TF_ASSIGN_OR_RETURN(
         auto new_instruction,
         HloInstruction::CreateFromProto(inst, operand_map, computation_map));
-    new_instruction->ClearUniqueIdInternal();
     builder.AddInstruction(std::move(new_instruction));
     auto computation = builder.Build();
     module.AddEntryComputation(std::move(computation));
@@ -399,9 +398,10 @@ struct PostorderDFSVisitor {
   // kGetDimensionSize or kSetDimensionSize doesn't need evaluation).
   bool IsInstructionOverLimit(const HloInstructionProto* proto,
                               const InferenceContext& context) {
-    auto subshape = std::make_unique<Shape>(ShapeUtil::GetSubshape(
-        tsl::gtl::ValueOrDie(Shape::FromProto(proto->shape())),
-        context.shape_index));
+    auto shape = Shape::FromProto(proto->shape());
+    TF_CHECK_OK(shape.status());
+    auto subshape = std::make_unique<Shape>(
+        ShapeUtil::GetSubshape(*shape, context.shape_index));
 
     if (subshape->IsArray() &&
         ShapeUtil::ElementsIn(*subshape) > kLargeShapeElementLimit) {
@@ -1439,7 +1439,8 @@ absl::StatusOr<PostorderDFSNode> PostorderDFSVisitor::AnalyzeIsDynamic(
                   bool lhs_value = lhs.Get<bool>(indices);
                   bool rhs_value = rhs.Get<bool>(indices);
                   if (optional_selector.has_value()) {
-                    // Manually evaluate the selection without using Evaluator.
+                    // Manually evaluate the selection without using
+                    // Evaluator.
                     if (*optional_selector) {
                       return lhs_value;
                     } else {
@@ -1664,7 +1665,9 @@ absl::StatusOr<Literal> ValueInference::AnalyzeIsDynamic(XlaOp op) {
       [&](int64_t handle) {
         return builder_->LookUpInstructionByHandle(handle);
       },
-      [&](int64_t handle) { return &(builder_->embedded_[handle]); });
+      [&](int64_t handle) {
+        return &(builder_->embedded_[handle].computation);
+      });
 
   auto result = visitor.PostOrderDFSVisit(
       op.handle(), PostorderDFSNodeType::kValueIsDynamic);
@@ -1829,7 +1832,9 @@ absl::StatusOr<OptionalLiteral> ValueInference::AnalyzeConstant(
       [&](int64_t handle) {
         return builder_->LookUpInstructionByHandle(handle);
       },
-      [&](int64_t handle) { return &(builder_->embedded_[handle]); });
+      [&](int64_t handle) {
+        return &(builder_->embedded_[handle].computation);
+      });
   TF_ASSIGN_OR_RETURN(Shape op_shape, builder_->GetShape(op));
   int64_t handle = op.handle();
   if (ShapeUtil::IsScalar(builder_->GetShape(op).value())) {

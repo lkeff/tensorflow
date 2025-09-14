@@ -1,3 +1,4 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("//tensorflow:strict.default.bzl", "py_strict_binary", "py_strict_library", "py_strict_test")
 load("//tensorflow:tensorflow.bzl", "check_deps")
 load("//tensorflow:tensorflow.default.bzl", "cuda_py_strict_test", "tf_py_strict_test", "tf_python_pybind_extension")
@@ -74,6 +75,7 @@ cc_library(
         "@com_google_absl//absl/hash",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/synchronization",
         "@com_google_absl//absl/types:optional",
         "@com_google_absl//absl/types:span",
         "@com_google_absl//absl/types:variant",
@@ -321,6 +323,7 @@ cuda_py_strict_test(
     srcs = ["context_cross_platform_gpu_test.py"],
     tags = [
         "no_oss",
+        "noasan",  # TODO(b/417285186): Re-enable once the test is fixed.
     ],
     tpu_ops_enabled = True,
     xla_enabled = True,
@@ -1000,7 +1003,10 @@ tf_py_strict_test(
 py_strict_library(
     name = "wrap_function",
     srcs = ["wrap_function.py"],
-    visibility = ["//tensorflow:internal"],
+    visibility = [
+        "//tensorflow:internal",
+        "//third_party/py/orbax/export:__subpackages__",
+    ],
     deps = [
         ":context",
         ":function",

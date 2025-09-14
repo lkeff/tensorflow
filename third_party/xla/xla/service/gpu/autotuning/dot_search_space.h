@@ -21,6 +21,7 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_instructions.h"
 #include "xla/service/gpu/matmul_utils.h"
 #include "xla/stream_executor/device_description.h"
@@ -43,8 +44,11 @@ class TritonDotFusionSearchSpace {
   // Generates the list of promising configs in the search space for the
   // autotuner to try. If `force_contracting_split` is set, the search space
   // will be restricted to only include configs with the given split_k factor.
+  // If `autotune_tma` is set, the search space will be extended with TMA
+  // parameterization.
   std::vector<TritonGemmConfig> GenerateConfigs(
-      std::optional<int64_t> force_contracting_split = std::nullopt) const;
+      std::optional<int64_t> force_contracting_split = std::nullopt,
+      bool autotune_tma = false) const;
 
   // Restrict the set of configs to the ones compatible with the hints list.
   // Generally, this will mean that configs are restricted to the ones that
@@ -107,6 +111,8 @@ class TritonDotFusionSearchSpace {
   // the updated list of configs is non-empty.
   void ExtendConfigs(std::vector<ConfigWithNotes>& configs,
                      ExtendConfigCallback extend_config) const;
+
+  bool HasExpensiveTransitiveParent(const HloInstruction* operand) const;
 
   // Computes the maximum number of total warps we should have to sufficiently
   // saturate the GPU.
@@ -204,6 +210,10 @@ class TritonDotFusionSearchSpace {
   void EliminateLowOccupancyConfigs(
       std::vector<ConfigWithNotes>& configs) const;
 
+  // Extend the passed configs with TMA parameterization.
+  void AddTmaParameter(const ConfigWithNotes& config,
+                       std::vector<ConfigWithNotes>& updated_configs) const;
+
   // The order of these fields is important: the values of those defined earlier
   // are used to compute the values of later ones.
   se::DeviceDescription device_description_;
@@ -213,6 +223,8 @@ class TritonDotFusionSearchSpace {
   int64_t rhs_parallel_size_;
   int operand_bitwidth_;
   int compute_bitwidth_;
+  bool lhs_has_expensive_op_;
+  bool rhs_has_expensive_op_;
   int desired_total_warps_;
   OutputTile max_out_tile_;
   bool should_optimize_for_occupancy_;
@@ -220,6 +232,7 @@ class TritonDotFusionSearchSpace {
   int min_warps_per_cta_;
   int min_contracting_tile_size_;
   int max_contracting_split_;
+  bool exhaustive_tiling_search_;
 };
 
 }  // namespace xla::gpu

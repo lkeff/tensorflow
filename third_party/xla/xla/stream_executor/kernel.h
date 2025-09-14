@@ -82,6 +82,7 @@ limitations under the License.
 #include <variant>
 
 #include "absl/container/inlined_vector.h"
+#include "absl/log/check.h"
 #include "absl/meta/type_traits.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -89,7 +90,6 @@ limitations under the License.
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "xla/stream_executor/device_memory.h"
-#include "xla/stream_executor/kernel_spec.h"
 #include "xla/stream_executor/launch_dim.h"
 #include "xla/stream_executor/stream.h"
 
@@ -236,20 +236,13 @@ class Kernel {
   absl::Status Launch(const ThreadDim &thread_dims, const BlockDim &block_dims,
                       Stream *stream, const KernelArgs &args);
 
-  // Launches a data parallel kernel with the given thread/block
-  // dimensionality and already-packed args/sizes to pass to the underlying
-  // platform driver.
-  absl::Status Launch(const ThreadDim &thread_dims, const BlockDim &block_dims,
-                      const ClusterDim &cluster_dims, Stream *stream,
-                      const KernelArgs &args);
-
- private:
   // Helper method to launch a kernel with optional cluster dimensions.
   virtual absl::Status Launch(const ThreadDim &thread_dims,
                               const BlockDim &block_dims,
                               const std::optional<ClusterDim> &cluster_dims,
                               Stream *stream, const KernelArgs &args) = 0;
 
+ private:
   std::string name_;
 
   KernelMetadata metadata_;
@@ -260,13 +253,6 @@ inline absl::Status Kernel::Launch(const ThreadDim &thread_dims,
                                    const BlockDim &block_dims, Stream *stream,
                                    const KernelArgs &args) {
   return Launch(thread_dims, block_dims, std::nullopt, stream, args);
-}
-inline absl::Status Kernel::Launch(const ThreadDim &thread_dims,
-                                   const BlockDim &block_dims,
-                                   const ClusterDim &cluster_dims,
-                                   Stream *stream, const KernelArgs &args) {
-  return Launch(thread_dims, block_dims, std::make_optional(cluster_dims),
-                stream, args);
 }
 
 //===----------------------------------------------------------------------===//
@@ -588,11 +574,12 @@ inline absl::StatusOr<std::unique_ptr<KernelArgsPackedArrayBase>>
 PackKernelArgs(absl::Span<const ArgType> args, uint32_t shared_mem_bytes) {
   static constexpr int kKernelArgsLimit = 1024;
 
-  if (args.size() > kKernelArgsLimit)
+  if (args.size() > kKernelArgsLimit) {
     return absl::InvalidArgumentError(absl::StrCat(
         "Can't pack device memory arguments array of size ", args.size(),
         " which is larger than the maximum supported size of ",
         kKernelArgsLimit));
+  }
 
   // Specialize kernel arguments array for small sizes to allocate a smaller
   // chunk of memory and hopefully hit a small allocations cache.

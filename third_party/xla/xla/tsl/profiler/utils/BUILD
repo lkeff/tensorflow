@@ -23,6 +23,7 @@ package_group(
 cc_library(
     name = "math_utils",
     hdrs = ["math_utils.h"],
+    visibility = internal_visibility([":friends"]),
 )
 
 cc_library(
@@ -198,6 +199,7 @@ cc_library(
     visibility = internal_visibility([
         "//xla/backends/profiler/gpu:__pkg__",
         "//xla/tsl/profiler:internal",
+        "//third_party/CoMMA:__pkg__",
     ]),
     deps = [
         "//xla/tsl/platform:types",
@@ -304,6 +306,7 @@ cc_library(
         "//xla/tsl/platform:logging",
         "//xla/tsl/platform:types",
         "@com_google_absl//absl/algorithm:container",
+        "@com_google_absl//absl/base:no_destructor",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/functional:bind_front",
@@ -473,6 +476,7 @@ cc_library(
         "//xla/tsl/platform:errors",
         "//xla/tsl/platform:status",
         "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/log",
         "@com_google_absl//absl/strings",
         "@local_tsl//tsl/profiler/lib:profiler_session",
         "@local_tsl//tsl/profiler/protobuf:profiler_options_proto_cc",
@@ -610,6 +614,10 @@ cc_library(
     srcs = ["profiler_options_util.cc"],
     hdrs = ["profiler_options_util.h"],
     deps = [
+        "@com_google_absl//absl/container:flat_hash_set",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:string_view",
         "@local_tsl//tsl/profiler/protobuf:profiler_options_proto_cc",
     ],
 )

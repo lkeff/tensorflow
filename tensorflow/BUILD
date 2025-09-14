@@ -2,6 +2,7 @@
 # TensorFlow is a computational framework, primarily for use in machine
 # learning applications.
 
+load("@rules_cc//cc:cc_import.bzl", "cc_import")
 load("@bazel_skylib//lib:selects.bzl", "selects")
 load("@bazel_skylib//rules:common_settings.bzl", "bool_flag", "bool_setting")
 load("@local_config_cuda//cuda:build_defs.bzl", "if_cuda")
@@ -357,9 +358,10 @@ config_setting(
             "@platforms//cpu:armv6-m",
             "@platforms//os:linux",
         ],
-    values = {
-        "crosstool_top": "@local_config_arm_compiler//:toolchain",
-    },
+    values = if_oss(
+        {"crosstool_top": "@local_config_arm_compiler//:toolchain"},
+        {},
+    ),
     visibility = ["//visibility:public"],
 )
 
@@ -400,9 +402,10 @@ config_setting(
             "@platforms//cpu:mips64",
             "@platforms//os:android",
         ],
-    values = {
-        "crosstool_top": "//external:android/crosstool",
-    },
+    values = if_oss(
+        {"crosstool_top": "//external:android/crosstool"},
+        {},
+    ),
     visibility = ["//visibility:public"],
 )
 
@@ -1039,6 +1042,7 @@ package_group(
 package_group(
     name = "ndarray_tensor_allow_list",
     packages = [
+        "//learning/gemini/gemax/...",
         "//third_party/py/courier/...",
         "//third_party/py/tensorfn/...",
     ],
@@ -1080,19 +1084,22 @@ bzl_library(
     visibility = ["//visibility:public"],
     deps = [
         ":tf_version_bzl",
+        # copybara:uncomment "//devtools/build_cleaner/skylark:build_defs_lib",
+        "@rules_cc//cc/common",
+        "@rules_java//java:rules",
+        "@local_xla//xla/tsl:tsl_bzl",
+        "@local_xla//xla/tsl:tsl_default_bzl",
+        "@local_xla//xla/tsl/mkl:build_defs_bzl",
         "//tensorflow/core/platform:build_config_root_bzl",
         "//tensorflow/core/platform:rules_cc_bzl",
+        "@local_xla//third_party/py/rules_pywrap:pywrap_bzl",
+        "@local_xla//third_party/compute_library:build_defs_bzl",
+        "@local_xla//third_party/llvm_openmp:openmp_bzl",
         "@bazel_skylib//lib:new_sets",
         "@bazel_skylib//rules:common_settings",
         "@local_config_cuda//cuda:build_defs_bzl",
         "@local_config_rocm//rocm:build_defs_bzl",
         "@local_config_tensorrt//:build_defs_bzl",
-        "@local_xla//third_party/compute_library:build_defs_bzl",
-        "@local_xla//third_party/llvm_openmp:openmp_bzl",
-        "@local_xla//third_party/py/rules_pywrap:pywrap_bzl",
-        "@local_xla//xla/tsl:tsl_bzl",
-        "@local_xla//xla/tsl/mkl:build_defs_bzl",
-        "@rules_java//java:rules",
     ],
 )
 

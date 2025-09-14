@@ -62,6 +62,7 @@ limitations under the License.
 #include "mlir/Transforms/DialectConversion.h"  // from @llvm-project
 #include "mlir/Transforms/Passes.h"  // from @llvm-project
 #include "stablehlo/dialect/ChloOps.h"  // from @stablehlo
+#include "stablehlo/transforms/Passes.h"  // from @stablehlo
 #include "tensorflow/compiler/mlir/tensorflow/utils/dump_mlir_util.h"
 #include "tensorflow/compiler/mlir/tools/kernel_gen/transforms/passes.h"
 #include "tensorflow/compiler/mlir/tools/kernel_gen/transforms/rewriters.h"
@@ -165,7 +166,9 @@ absl::Status LowerHlotoLoops(mlir::ModuleOp module,
             /*jit_i64_indexed_for_large_tensors=*/true));
   }
 
-  pm.addNestedPass<FuncOp>(mlir::mhlo::createChloLegalizeToHloPass());
+  pm.addNestedPass<mlir::func::FuncOp>(
+      mlir::stablehlo::createChloLegalizeToStablehloPass());
+  pm.addPass(mlir::mhlo::createStablehloLegalizeToHloPass());
 
   pm.addNestedPass<FuncOp>(mlir::createCanonicalizerPass());
   pm.addNestedPass<FuncOp>(mlir::createCSEPass());
@@ -342,7 +345,7 @@ absl::Status LowerKernelBodiesToLowLevelIr(mlir::ModuleOp module,
   kernelPm.addPass(mlir::createGpuKernelToRocdlPass(architecture));
 #elif GOOGLE_CUDA
   kernelPm.addPass(mlir::createGpuKernelToNvvmPass());
-  kernelPm.addPass(mlir::NVVM::createOptimizeForTargetPass());
+  kernelPm.addPass(mlir::LLVM::createNVVMOptimizeForTargetPass());
 #endif
   // Remove all location information to prevent a debug build.
   pm.addPass(::mlir::createStripDebugInfoPass());
@@ -468,7 +471,7 @@ absl::StatusOr<mlir::OwningOpRef<mlir::ModuleOp>> GenerateKernelForHloCode(
     // restructure this code to generate separate MLIR modules for each
     // architecture.
     const std::string& first_architecture =
-        architectures.size() > 0 ? architectures[0] : "";
+        !architectures.empty() ? architectures[0] : "";
     TF_RETURN_IF_ERROR(LowerKernelBodiesToLowLevelIr(
         module.get(), apply_cl_options, first_architecture));
     TF_RETURN_IF_ERROR(

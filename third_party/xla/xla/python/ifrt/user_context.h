@@ -19,11 +19,16 @@ limitations under the License.
 #include <cstdint>
 #include <string>
 
+#include "absl/base/nullability.h"
 #include "llvm/Support/ExtensibleRTTI.h"
 #include "xla/tsl/concurrency/ref_count.h"
+#include "xla/tsl/lib/gtl/int_type.h"
 
 namespace xla {
 namespace ifrt {
+
+// Globally unique ID for a `UserContext`.
+TSL_LIB_GTL_DEFINE_INT_TYPE(UserContextId, uint64_t);
 
 // UserContext is an interface that must be implemented by any object that the
 // user would like to be associated with the runtime operations triggered by an
@@ -33,24 +38,77 @@ namespace ifrt {
 class UserContext : public tsl::ReferenceCounted<UserContext>,
                     public llvm::RTTIExtends<UserContext, llvm::RTTIRoot> {
  public:
-  static tsl::RCReference<UserContext> Default();
-
   ~UserContext() override = default;
 
-  // Returns a fingerprint of the UserContext. The returned fingerprint is must
+  // Returns a fingerprint of the UserContext. The returned fingerprint must
   // be non-zero, as the special value of zero is reserved for the IFRT
   // implementations for their internal default UserContext.  IFRT
   // implementations may use internally. IFRT implementations
   // may also use this as a key for holding the UserContexts in a container, and
   // so this should be efficient enough to called multiple times.
+  //
+  // TODO(hyeontaek): Remove this method once we migrate all users of
+  // `Fingerprint()` to `Id()`. This will require the users to stop expecting to
+  // see a small finite set of unique IDs over the lifetime of a process because
+  // `Id()` semantics allows an indefinite set of IDs.
   virtual uint64_t Fingerprint() const = 0;
+
+  // Returns the unique ID of the UserContext. This ID is expected to be
+  // globally unique for a certain context. For instance, both a global random
+  // ID and the fingerprint of the UserContext content may be used as the ID.
+  virtual UserContextId Id() const = 0;
 
   // Returns a human readable string. Meant for debugging, logging, and for
   // putting together statusz-like pages.
+  //
+  // Caution: A call to this method is often expensive, and may accompany a
+  // certain precondition. For instance, this method might internally acquire a
+  // mutex lock that is visible to the external world (e.g., Python GIL), and
+  // the caller must ensure that doing so would not cause a deadlock (e.g., no
+  // one who is holding such a mutex lock never blocks on a call to this
+  // method).
   virtual std::string DebugString() const = 0;
 
   // For llvm::RTTI
   static char ID;  // NOLINT
+};
+
+using UserContextRef = tsl::RCReference<UserContext>;
+
+// Tracks the active `UserContext` within the scope. It holds a pointer to the
+// `UserContext` instance and uses a thread-local variable to make it
+// discoverable through a static method.
+class UserContextScope {
+ public:
+  // Sets up the current thread's `UserContextRef` to the given `context`.
+  // `context` must be valid throughout the lifetime of the scope.
+  explicit UserContextScope(absl_nullable UserContextRef context);
+
+  // Restores the current thread's `UserContextRef` to the state before this
+  // scope was created.
+  ~UserContextScope();
+
+  // Not copyable or moveable. The current scope's UserContextScope will be
+  // referenced by a thread-local raw pointer.
+  UserContextScope(const UserContextScope&) = delete;
+  UserContextScope(UserContextScope&&) = delete;
+  UserContextScope& operator=(const UserContextScope&) = delete;
+  UserContextScope& operator=(UserContextScope&&) = delete;
+
+  // Returns the active `UserContextRef`. The returned reference is stable only
+  // during the lifetime of the current scope. If the `UserContextRef` should be
+  // used outside the current scope, it must be copied as a new
+  // `UserContextRef`.
+  //
+  // Returns `nullptr` if there is no `UserContextRef` in the scope.
+  static absl_nullable const UserContextRef& current();
+
+ private:
+  // The outer scope's `UserContext`. When this scope is destroyed, the current
+  // scope's `UserContext` will be restored to it.
+  absl_nullable const UserContextRef* const outer_context_;  // Not owned.
+  // The current scope's `UserContext`.
+  absl_nullable const UserContextRef context_;
 };
 
 }  // namespace ifrt

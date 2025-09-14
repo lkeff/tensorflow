@@ -45,6 +45,7 @@ limitations under the License.
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_join.h"
+#include "absl/strings/str_replace.h"
 #include "absl/strings/str_split.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
@@ -58,29 +59,6 @@ limitations under the License.
 #include "tsl/platform/stacktrace.h"
 
 namespace xla {
-
-std::vector<int64_t> ToMixedRadix(const int64_t n,
-                                  absl::Span<const int64_t> bounds) {
-  if (bounds.empty()) {
-    return {};
-  }
-
-  std::vector<int64_t> digits;
-  digits.reserve(bounds.size());
-  int64_t divisor = Product(bounds);
-  CHECK_GT(divisor, 0);
-  int64_t remainder = n % divisor;
-  for (const int64_t radix : bounds) {
-    CHECK_GT(radix, 0);
-    divisor /= radix;
-    CHECK_GT(divisor, 0);
-
-    // The divisor is always 1 for the last iteration.
-    digits.push_back(remainder / divisor);
-    remainder = remainder % divisor;
-  }
-  return digits;
-}
 
 absl::Status WithLogBacktrace(const absl::Status& status) {
   CHECK(!status.ok());
@@ -105,7 +83,8 @@ ScopedLoggingTimer::ScopedLoggingTimer(absl::string_view label, bool enabled,
 void ScopedLoggingTimer::StopAndLog() {
   if (enabled_) {
     uint64_t end_micros = tsl::Env::Default()->NowMicros();
-    double secs = (end_micros - start_micros_) / 1000000.0;
+    uint64_t elapsed_micros = end_micros - start_micros_;
+    double secs = elapsed_micros / 1000000.0;
 
     TimerStats& stats = *timer_stats_;
     absl::MutexLock lock(&stats.stats_mutex);
@@ -117,6 +96,7 @@ void ScopedLoggingTimer::StopAndLog() {
 
     LOG(INFO).AtLocation(file_, line_)
         << label_ << " time: " << tsl::strings::HumanReadableElapsedTime(secs)
+        << " (" << elapsed_micros << " us)"
         << " (cumulative: "
         << tsl::strings::HumanReadableElapsedTime(stats.cumulative_secs)
         << ", max: " << tsl::strings::HumanReadableElapsedTime(stats.max_secs)
@@ -309,6 +289,12 @@ std::string HumanReadableNumOps(double flops, double nanoseconds,
   throughput += absl::StrCat(op_prefix, "OP/s");
   return throughput;
 }
+
+void LogString(absl::string_view fname, int line, absl::LogSeverity severity,
+               absl::string_view message) {
+  LOG(LEVEL(severity)).AtLocation(fname, line) << message;
+}
+
 }  // namespace
 
 std::string HumanReadableNumFlops(double flops, double nanoseconds) {
@@ -339,14 +325,12 @@ void LogLines(absl::LogSeverity sev, absl::string_view text, const char* fname,
       eol = text.size();
     }
     auto msg = text.substr(cur, eol - cur);
-    tsl::internal::LogString(fname, lineno, sev,
-                             std::string(msg.data(), msg.size()));
+    LogString(fname, lineno, sev, msg);
     cur = eol + 1;
   }
 
   if (orig_sev == absl::LogSeverity::kFatal) {
-    tsl::internal::LogString(fname, lineno, orig_sev,
-                             "Aborting due to errors.");
+    LogString(fname, lineno, orig_sev, "Aborting due to errors.");
   }
 }
 
@@ -366,7 +350,8 @@ std::vector<int64_t> ElemwiseProduct(absl::Span<const int64_t> a,
 
 absl::InlinedVector<std::pair<int64_t, int64_t>, 8> CommonFactors(
     absl::Span<const int64_t> a, absl::Span<const int64_t> b) {
-  CHECK_EQ(Product(a), Product(b));
+  CHECK_EQ(Product(a), Product(b)) << "a=[" << absl::StrJoin(a, ",") << "], b=["
+                                   << absl::StrJoin(b, ",") << "]";
   absl::InlinedVector<std::pair<int64_t, int64_t>, 8> bounds;
   if (absl::c_equal(a, b)) {
     bounds.reserve(a.size() + 1);
@@ -511,6 +496,19 @@ std::string SanitizeFileName(std::string file_name) {
     }
   }
   return file_name;
+}
+
+std::string SanitizeOpName(std::string op_name, char separator,
+                           const std::string& replace_with) {
+  auto pos = op_name.rfind(separator);
+  if (pos > 0 && pos != std::string::npos) {
+    std::string suffix = op_name.substr(pos + 1);
+    if (std::all_of(suffix.begin(), suffix.end(), absl::ascii_isdigit)) {
+      op_name = op_name.substr(0, pos);
+    }
+  }
+  return absl::StrReplaceAll(op_name,
+                             {{std::string(1, separator), replace_with}});
 }
 
 bool DistinctNumbersAreConsecutiveIfSorted(absl::Span<const int64_t> seq) {

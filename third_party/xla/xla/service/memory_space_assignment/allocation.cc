@@ -198,7 +198,7 @@ absl::Status Allocation::UpdateUses(HloComputation* computation,
       replacement_instruction = computation->AddInstruction(
           HloInstruction::CreateBitcast(operand_shape, producing_instruction));
       if (mutable_split_shape().has_value() &&
-          producing_instruction->shape().layout().split_configs_size() != 0) {
+          producing_instruction->shape().layout().split_configs().size() != 0) {
         TF_ASSIGN_OR_RETURN(
             int64_t split_dim,
             bitcast_split_fn(
@@ -322,9 +322,9 @@ void PinnedAllocation::MarkNeeded(
 
 ReservedAllocation::ReservedAllocation(HloPosition defining_position,
                                        HeapSimulator::Chunk chunk,
-                                       int64_t reservation_time)
+                                       int64_t start_time, int64_t end_time)
     : Allocation(std::move(defining_position), MemorySpace::kAlternate, chunk,
-                 /*start_time=*/reservation_time, /*end_time=*/reservation_time,
+                 /*start_time=*/start_time, /*end_time=*/end_time,
                  /*cross_program_prefetch_index=*/std::nullopt),
       reserved_(true) {}
 
@@ -354,9 +354,9 @@ std::string ReservedAllocation::ToString() const {
     absl::StrAppend(&memory_space_str, " chunk: ", chunk->ToString());
   }
   return absl::StrCat(
-      "ReservedAllocationdefined in alternate memory defined at ",
-      original_defining_position().ToString(),
-      ", reservation_time:", start_time(), ", reserved: ", reserved_);
+      "ReservedAllocation defined in alternate memory defined at ",
+      original_defining_position().ToString(), ", start_time: ", start_time(),
+      ", end_time: ", end_time(), " reserved: ", reserved_);
 }
 
 bool ReservedAllocation::operator==(const Allocation& other) const {
@@ -968,18 +968,17 @@ WindowPrefetchedAllocation::WindowPrefetchedAllocation(
           InclusiveToExclusiveEndTime(prefetch_done_schedule_before_time),
           /*cross_program_prefetch_index=*/std::nullopt),
       options_(options),
-      prev_allocation_(prev_allocation),
+      defining_position_(prev_allocation.defining_position()),
       use_(use),
       prefetch_start_schedule_after_(prefetch_start_schedule_after_time),
       prefetch_done_schedule_before_(prefetch_done_schedule_before_time),
       bytes_(chunk.size) {}
 
 HloPosition WindowPrefetchedAllocation::defining_position() const {
-  HloPosition defining_position = original_defining_position();
-  if (defining_position.instruction == nullptr) {
-    return prev_allocation_.defining_position();
+  if (defining_position_.instruction != nullptr) {
+    return defining_position_;
   }
-  return defining_position;
+  return original_defining_position();
 }
 
 int64_t WindowPrefetchedAllocation::earliest_available_time() const {
@@ -1017,10 +1016,11 @@ absl::Status WindowPrefetchedAllocation::InsertWindowPrefetchInstruction(
 
 absl::Status WindowPrefetchedAllocation::Process(
     const BitcastSplitFn& bitcast_split_fn) {
-  HloInstruction* producing_instruction = AddGetTupleElements();
-  HloComputation* computation = producing_instruction->parent();
   HloInstruction* use_instruction = use_.instruction;
   int64_t use_operand = use_instruction->operand_count();
+  HloInstruction* producing_instruction =
+      use_instruction->mutable_operand(use_.operand_number);
+  HloComputation* computation = producing_instruction->parent();
   CHECK_EQ(use_instruction->opcode(), HloOpcode::kFusion);
 
   TF_RETURN_IF_ERROR(InsertWindowPrefetchInstruction(
@@ -1032,7 +1032,8 @@ absl::Status WindowPrefetchedAllocation::Process(
                                       use_operand);
 
   // Set the original defining position to the window prefetch instruction.
-  set_original_defining_position(HloPosition{prefetch_instruction_, {}});
+  set_original_defining_position(defining_position_);
+  defining_position_ = {prefetch_instruction_, {}};
   AddUse(HloUse{use_instruction, use_operand});
   return absl::OkStatus();
 }
@@ -1045,7 +1046,6 @@ void WindowPrefetchedAllocation::MarkIfNeeded(
 void WindowPrefetchedAllocation::MarkNeeded(
     absl::flat_hash_set<const Allocation*>& needed_allocations) const {
   needed_allocations.insert(this);
-  prev_allocation_.MarkNeeded(needed_allocations);
 }
 
 std::string WindowPrefetchedAllocation::ToString() const {

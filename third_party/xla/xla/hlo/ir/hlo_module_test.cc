@@ -16,6 +16,7 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_module.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <utility>
@@ -36,6 +37,7 @@ limitations under the License.
 #include "xla/service/hlo_module_config.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
+#include "xla/tsl/lib/core/status_test_util.h"
 #include "xla/tsl/platform/status.h"
 #include "xla/tsl/platform/statusor.h"
 #include "xla/tsl/platform/test.h"
@@ -200,15 +202,57 @@ TEST(HloModuleTest, CloneGeneral) {
 
   EXPECT_EQ(m1.computation_count(), m2->computation_count());
   size_t i = 0;
-  for (auto it1 = m1.computations().begin(), it2 = m2->computations().begin();
-       it1 != m1.computations().end() && it2 != m2->computations().end();
+  auto m1_computations = m1.computations();
+  auto m2_computations = m2->computations();
+  for (auto it1 = m1_computations.begin(), it2 = m2_computations.begin();
+       it1 != m1_computations.end() && it2 != m2_computations.end();
        ++it1, ++it2) {
     const HloComputation *c1 = *it1, *c2 = *it2;
     EXPECT_EQ(GetCloneName(c1->name()), c2->name())
         << "Computation sequence mismatch at " << i;
-    EXPECT_EQ(GetCloneName(m1.mutable_computation(i)->name()),
-              m2->mutable_computation(i)->name())
-        << "Indexing computation sequence mismatch at " << i;
+  }
+}
+
+TEST(HloModuleTest, CloneWithContextGeneral) {
+  HloModule m1("temp_module", HloModuleConfig());
+  HloSchedule schedule(&m1);
+  CreateComputation(m1, "TestComputation1", true, schedule);
+  CreateComputation(m1, "TestComputation3", false, schedule);
+  CreateComputation(m1, "TestComputation2", false, schedule);
+  TF_CHECK_OK(m1.set_schedule(schedule));
+  m1.AddCrossProgramPrefetch(7, ShapeIndex({8}), 100);
+
+  auto [m2, clone_context] = m1.CloneWithContext(kCloneSuffix);
+
+  EXPECT_EQ(&m1.config(), &m2->config());
+  EXPECT_EQ(GetCloneName(m1.entry_computation()->name()),
+            m2->entry_computation()->name());
+
+  EXPECT_EQ(m1.schedule()
+                .sequence(m1.entry_computation())
+                .instructions()
+                .front()
+                ->name(),
+            m2->schedule()
+                .sequence(m2->entry_computation())
+                .instructions()
+                .front()
+                ->name());
+
+  EXPECT_EQ(m1.CrossProgramPrefetches().front().alt_memory_offset,
+            m2->CrossProgramPrefetches().front().alt_memory_offset);
+
+  EXPECT_EQ(m1.computation_count(), m2->computation_count());
+  size_t i = 0;
+  auto m1_computations = m1.computations();
+  auto m2_computations = m2->computations();
+  for (auto it1 = m1_computations.begin(), it2 = m2_computations.begin();
+       it1 != m1_computations.end() && it2 != m2_computations.end();
+       ++it1, ++it2) {
+    const HloComputation *c1 = *it1, *c2 = *it2;
+    EXPECT_EQ(GetCloneName(c1->name()), c2->name())
+        << "Computation sequence mismatch at " << i;
+    EXPECT_EQ(clone_context->FindComputation(c1), c2);
   }
 }
 
@@ -236,6 +280,36 @@ TEST(HloModuleTest, CloneWithNewConfig) {
   EXPECT_EQ(pm2->config().device_type(), m1.config().device_type());
   EXPECT_NE(pm2->config().device_memory_size(),
             m1.config().device_memory_size());
+}
+
+TEST(HloModuleTest, UniqueIdProvidesComputationPrefix) {
+  HloModule m1("temp_module", HloModuleConfig());
+  HloSchedule schedule(&m1);
+  CreateComputation(m1, "TestComputation1", true, schedule);
+  CreateComputation(m1, "TestComputation2", false, schedule);
+  CreateComputation(m1, "TestComputation3", false, schedule);
+  TF_EXPECT_OK(m1.set_schedule(schedule));
+
+  EXPECT_EQ(m1.GetComputationWithName("TestComputation1")
+                ->GetInstructionWithName("p0")
+                ->unique_id(),
+            0);
+  EXPECT_EQ(m1.GetComputationWithName("TestComputation2")
+                ->GetInstructionWithName("p0.1")
+                ->unique_id(),
+            (static_cast<int64_t>(1) << 32) + 0);
+  EXPECT_EQ(m1.GetComputationWithName("TestComputation1")
+                ->GetInstructionWithName("call")
+                ->unique_id(),
+            1);
+  EXPECT_EQ(m1.GetComputationWithName("TestComputation3")
+                ->GetInstructionWithName("p0.2")
+                ->unique_id(),
+            (static_cast<int64_t>(2) << 32) + 0);
+  EXPECT_EQ(m1.GetComputationWithName("TestComputation1")
+                ->GetInstructionWithName("call.1")
+                ->unique_id(),
+            2);
 }
 
 TEST(HloModuleTest, ClonePreservesUniqueId) {
@@ -640,6 +714,37 @@ TEST(HloModuleTest, MultipleCallsFromOneInstruction) {
 
   EXPECT_THAT(f->caller_instructions(), ElementsAre(conditional));
   EXPECT_THAT(g->caller_instructions(), ElementsAre(conditional));
+}
+
+TEST(HloModuleTest, TestUniqueIdIs64Bits) {
+  const char* hlo = R"(
+    f {
+      ROOT tparam = f32[4] parameter(0)
+    }
+
+    g {
+      ROOT fparam = f32[4] parameter(0)
+    }
+
+    ENTRY main {
+      p0 = f32[4] parameter(0)
+      b0 = f32[4] parameter(1)
+      call.f.0 = f32[4] call(p0), to_apply=f
+      call.g.0 = f32[4] call(b0), to_apply=g
+      ROOT sum = f32[4] add(call.f.0, call.g.0)
+    })";
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                          ParseAndReturnUnverifiedModule(hlo));
+  HloComputation* f = module->GetComputationWithName("f");
+  HloInstruction* tparam = f->GetInstructionWithName("tparam");
+  HloComputation* g = module->GetComputationWithName("g");
+  HloInstruction* fparam = g->GetInstructionWithName("fparam");
+
+  // Upper 32 bits should make them different
+  EXPECT_NE(tparam->unique_id(), fparam->unique_id());
+  // Lower 32 bits should be preserved and therefore the same
+  EXPECT_EQ(tparam->unique_id() & 0xFFFFFFFF, fparam->unique_id() & 0xFFFFFFFF);
+  TF_EXPECT_OK(module->CheckUniqueNamesAndIdsForComputationsAndInstructions());
 }
 
 }  // namespace
